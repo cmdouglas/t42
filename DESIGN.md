@@ -50,7 +50,7 @@ Table: `Texas42` (single-table design)
 
 | PK | SK | Item type |
 |---|---|---|
-| `GAME#<gameId>` | `META` | Game metadata: players, seat order, status, created_at, and rule config (enabled contracts, doubles-as-own-suit flag, marks-to-win, default 7) |
+| `GAME#<gameId>` | `META` | Game metadata: players, seat order, status, created_at, and the game's house rules (enabled contracts, per-contract options, doubles-as-own-suit flag, marks-to-win, default 7 - see section 5.1) |
 | `GAME#<gameId>` | `EVENT#<seq>` | One immutable event: bid, pass, trump declaration, domino play |
 | `GAME#<gameId>` | `STATE` | Materialized current full state (server-side only — includes all hands), plus `version` for optimistic locking |
 | `PLAYER#<playerId>` | `GAME#<gameId>` | Lookup: which games a player is in, and their seat/turn status (for "my games" queries and notification targeting) |
@@ -80,11 +80,98 @@ Structured as a pure library, independent of AWS, with these components:
 - **Domino & suit logic**: representation of the 28 tiles, suit-of-a-domino given trump (including doubles-as-trump variant), ranking within a suit/trump.
 - **Bid state machine**: turn order for bidding, valid bid values (numeric 30–42, and mark-based contract bids), pass handling, re-bid rules, determining the winning bid and declarer.
 - **Contract strategies**: a `Contract` interface with implementations for Standard, Nello, Plunge, Sevens, and Splash, each defining: who leads, whether/how a partner sits out or is dictated, trump-selection rules, legal-play rules, and scoring math for the hand. New contracts plug in without touching core trick logic — the engine holds a registry of known contracts keyed by name rather than a hardcoded switch.
-- **Rule-variant flags**: doubles-as-own-suit, and which contracts are legal to bid, are treated as per-game configuration rather than global constants — set once at game creation (see `META` in section 4.1) and read by the bidding state machine and contract registry on every move. Adding a new variant later means adding a flag and a branch, not touching how existing games are scored or replayed.
+- **Rule-variant flags**: every rule choice that varies between tables - which contracts are legal to bid, the terms each may be bid on, doubles-as-own-suit, marks-to-win - is per-game configuration rather than a global constant, set once at game creation (see `META` in section 4.1) and read by the bidding state machine and contract registry on every move. Section 5.1 defines the model.
 - **Trick engine**: given current trick state and a proposed play, validates follow-suit legality and determines the trick winner.
 - **Scoring**: count-domino values (5-5, 6-4 = 10; 5-0, 4-1, 3-2 = 5), trick points, comparison against the bid, mark accounting for game-to-N-marks.
 
 This layer gets the heaviest test investment — property-based and table-driven unit tests covering suit-follow edge cases, each contract type, and scoring, since this is historically where domino-game implementations get subtly wrong.
+
+### 5.1 House rules
+
+A *house-rule set* is the complete set of rule choices a table plays under: which contracts are available, the terms each may be bid on, and how the game is scored. It is fixed when the game is created, stored on the `META` item, and threaded through every engine call as an argument - never read from module state. Two games created under different house rules must score and replay correctly side by side in the same process.
+
+**Shape.** One frozen `HouseRules` value (`t42/engine/house_rules.py`) carries:
+
+| Field | Meaning |
+|---|---|
+| `enabled_contracts` | Which registered contracts may be bid this game. `standard` cannot be disabled. |
+| `contract_options` | Per-contract terms: `Mapping[str, Mapping[str, OptionValue]]`, where `OptionValue = int \| bool \| str`. |
+| `doubles_are_own_suit` | Whether doubles form a seventh suit rather than sitting in their number suit. |
+| `allow_declared_lead` | Whether a leader may name which end of their tile is the suit led: `never` (default), `first_trick`, `always`. See section 5.2. |
+| `marks_to_win` | Game length, default 7. |
+
+`contract_options` is plain data, so the Phase 1 codec encodes it with no special cases and a replayed game gets byte-identical rules.
+
+**Contracts declare their own options.** The core config type never names a specific contract - that would undo the registry. Instead the `Contract` protocol gains:
+
+- `option_defaults() -> Mapping[str, OptionValue]` - the option keys this contract accepts, with the values used when the house does not override them.
+- `validate_options(options, rules) -> None` - the contract's own checks on the merged result.
+
+A contract reads its effective terms through `HouseRules.options_for(name)`, which merges the game's overrides over that contract's defaults. Because `option_defaults()` enumerates the accepted keys, an unrecognised key is an error, which gives typo detection with no schema language.
+
+Example: plunge and splash differ only in their entry bar and whether the partner must confirm, so those minimums are options rather than facts about the contract class:
+
+```
+HouseRules(
+    enabled_contracts=frozenset({"standard", "nello", "plunge", "splash"}),
+    contract_options={
+        "plunge": {"minimum_doubles": 5, "minimum_marks": 4},  # a stricter-than-usual table
+        "splash": {"minimum_doubles": 3, "minimum_marks": 2},  # the usual bar
+    },
+)
+```
+
+**Validation is two layers**, so `house_rules.py` stays dependency-free and importable without the registry:
+
+1. `HouseRules.__post_init__` - structural checks that need no registry: `marks_to_win >= 1`, `standard` present in `enabled_contracts`, option values of the right type.
+2. `contracts.validate_house_rules(rules)` - registry-aware checks, called from `new_game` so an invalid rule set can never produce a game: every named contract is registered, every contract given options is actually enabled, every option key is one that contract declares, and each contract's own `validate_options` passes.
+
+**What "makes sense" means.** A house-rule set is rejected unless it clears three tiers:
+
+1. **Structural** - names resolve, the required contract is present, values are the right type and in range.
+2. **Satisfiable** - every enabled contract must be biddable under the rest of the rule set. A doubles minimum above 7 can never be met (there are only 7 doubles); a mark minimum above the 7-mark bid ceiling can never be bid. Enabling a contract nobody can ever bid is a bug in the rule set, not a quirk of it.
+3. **Coherent** - choices must not contradict each other across contracts. This tier is deliberately thin while entry bars are the only options, and it should stay thin: a rule set that is merely unusual is the table's business, and only a genuine self-contradiction is rejected. The one check today: plunge is by definition the heavier of the two doubles contracts, so if both are enabled, plunge's bar must be at least as hard as splash's on both axes. A game where splash demands more doubles or more marks than plunge has the two contracts inverted, and the names no longer mean what the rest of the design says they mean. This check lives inside the plunge and splash contracts, which receive the whole `HouseRules` in `validate_options`, so no core module learns their names.
+
+   Note what is *not* checked. Plunge and splash score identically and plunge additionally needs the partner's confirmation, so at the default bars (plunge 4 doubles / 4 marks, splash 3 / 2) any hand that could plunge could instead splash, with no confirmation step and at the same reward. Plunge is therefore weakly dominated by splash whenever both are enabled. That is a property of the game, not an error in the rule set - most tables enable one or the other - so the validator records it in neither direction and lets the table play as it likes.
+
+**Flag or new contract?** Both kinds of variant exist, and the line between them is *scope*, not size:
+
+- A **game-wide** mechanic, applying uniformly to every contract the game enables, is a flag on `HouseRules`. `doubles_are_own_suit` is one: it changes suit membership, ranking and what may be trump, for every contract at once. Declared leads (section 5.2) is another.
+- A **contract-specific** behavioural difference is a new registered contract, not a flag. This is exactly why `nello_low` is its own contract rather than a `nello` option (see section 12): only nello's own trick resolution changes, so the difference belongs behind the `Contract` protocol where the rest of the engine never sees it.
+
+A contract may narrow a game-wide flag for itself through `contract_options` (a table might allow declared leads generally but not under nello), but never widen one past what the game allows. Narrowing is a table's business; widening is a contradiction, and the validator rejects it.
+
+**Non-goal.** `HouseRules` selects among registered contracts, sets their numeric terms, and switches the game-wide mechanics enumerated above. It does not let a game invent a contract, and it is not an extension language: every option is a named field or a declared per-contract key that some engine module reads on purpose. Variants not yet modelled (the set penalty, the mark value of a made point bid, the bid floor and ceiling, the all-pass rule) are fixed for now; the point of the mechanism is that adding one later is adding an option, not another refactor.
+
+### 5.2 Declared leads
+
+A house rule some tables play: **the leader may name which of a tile's two ends is the suit led**, instead of the default rule that a non-trump lead calls for its higher end. Leading `3-2`, the leader may call it the three of twos rather than the two of threes, and everyone follows twos.
+
+The option is three-valued rather than a boolean, because tables differ on how far the privilege extends:
+
+| `allow_declared_lead` | Meaning |
+|---|---|
+| `"never"` (default) | The higher end names the suit, always. Current engine behaviour. |
+| `"first_trick"` | The leader may declare on the first trick of each hand only. |
+| `"always"` | The leader may declare on any trick they lead. |
+
+Declaring is never compulsory under any setting: a lead with no declaration falls back to the higher-end rule.
+
+**The model change this forces.** Today the led suit is *derived*, recomputed from the opening tile by `suits.led_suit()` wherever it is needed. Under this rule it becomes a *decision*, and a decision that cannot be reconstructed from the tiles alone. So the led suit becomes recorded state:
+
+- `Trick` gains `declared_suit: Suit | None`, `None` meaning "apply the default rule".
+- One helper, `suit_led(trick, trump, rules)`, returns the declaration if present and falls back to `led_suit()` otherwise. It replaces both existing `led_suit()` call sites, which sit together in `trick_rules.py` (follow-suit legality, and the trick winner). Every contract already routes through those two functions, so no contract changes.
+- `PlayDomino` and `DominoPlayed` gain the declared suit. It **must** ride on the event: a log that recorded only the tile could not be replayed, since the suit led is no longer a function of the tile. This is the same argument that puts the plunge confirmation on the log.
+
+Ranking needs no change at all. `rank_in_suit` already ranks a tile by its *other* end relative to whichever suit is asked about, so `3-2` is the two of threes or the three of twos depending only on the suit passed in.
+
+**Trump does not become negotiable.** A tile with a trump end is a trump tile, and leading it leads trump. The declaration chooses between the two ends only when neither is trump, so a lead can never be laundered out of the trump suit. The alternative, letting the leader call `3-2` a two while threes are trump, would make trump membership a property of the trick rather than of the tile plus the hand's trump, and the rule that "a trump follows trump and nothing else" would stop having a well-defined meaning for the other three players.
+
+**Doubles offer no choice**, under either setting of `doubles_are_own_suit`: a double belongs to a single number suit, or to the doubles suit alone. Nothing to declare.
+
+**Scope across contracts.** The flag is game-wide and applies to every enabled contract, with two consequences worth stating. Under nello and sevens there is no trump, so every non-double a leader holds has two live ends and the privilege is at its strongest; a table that wants declared leads in standard play but not under nello narrows it there through `contract_options` (see section 5.1). Under sevens the declaration changes what the other seats may legally play without changing who wins the trick, since the sevens winner is decided by pip distance and ignores suit entirely.
+
+**Hidden information is unaffected.** The declaration is announced at the table, rides on the public `DominoPlayed` event, and appears in the current and completed tricks that `project()` already exposes. No new gate, and nothing for `project()` to filter.
 
 ## 6. API Surface (MVP)
 
@@ -108,7 +195,8 @@ A thin client with no game logic of its own — it renders the projected view an
 
 Commands (rough):
 ```
-t42 create-game --contracts nello,plunge,sevens,splash --doubles-trump --marks 7
+t42 create-game --contracts nello,plunge,sevens,splash --doubles-trump --marks 7 \
+      --set plunge.minimum_doubles=5      # per-contract house-rule options, section 5.1
 t42 join <game-code> --seat 2
 t42 status <game-code>            # show current view: your hand, trump, trick, whose turn
 t42 bid <game-code> 32            # or: t42 bid <game-code> pass
@@ -164,12 +252,13 @@ None of these require touching the domain engine, persistence layer, or API cont
 
 ## 12. Open Questions
 
-- Resolved: doubles-as-own-suit and which special contracts are enabled are per-game configuration, set at creation (see sections 4.1, 5). Six contracts ship in Phase 0: standard, nello, nello_low, sevens, plunge, splash.
-- Resolved: contract rule variants.
+- Resolved: doubles-as-own-suit and which special contracts are enabled are per-game configuration, set at creation (see sections 4.1, 5.1). Six contracts ship in Phase 0: standard, nello, nello_low, sevens, plunge, splash.
+- Resolved: contract rule variants. The doubles and marks minimums below are the **defaults** a table gets when it says nothing; each is a per-contract house-rule option a game may override at creation (section 5.1). Everything else below is intrinsic to the contract and not configurable.
   - **Nello / nello_low**: two separate registered contracts rather than one contract with a doubles-handling flag, since regional practice differs. `nello` (default, enabled by default): doubles form their own suit, ranked 6-6 high down to 0-0 low — fixed to this contract regardless of the game's `doubles_are_own_suit` flag. `nello_low`: doubles rank lowest in their number suit; off by default, enabled per game like splash. Both: declarer's partner sits out (hand is played 3-handed), declarer leads first, no trump, declarer's side must lose every trick or the bid is set.
   - **Plunge**: bidder holds 4+ of the 7 doubles, bids 4+ marks, and the bid only becomes live once the bidder's partner explicitly agrees ("do you want to plunge?"). If declined, no bid was placed and the proposer bids again on the same turn. The proposal and the response are both public — ordinary events on the game log, visible to every seat, whether accepted or declined; this is table information, not a private channel between partners. On a made bid, the bidder's partner (not the bidder) names trump and leads the first trick.
   - **Splash**: bidder holds 3+ of the 7 doubles, bids 2+ marks, no partner confirmation needed. Otherwise the same shape as plunge (partner names trump and leads). Off by default.
   - **Sevens**: no trump. The trick winner is whichever played tile has pip-sum closest to 7; ties go to whichever tied tile was played earliest (a later play must strictly beat the standing winner, not just match it).
   - **All-pass**: the dealer may not pass. If the other three seats have all passed, the dealer must place some legal bid — 30 points, or a mark bid for any contract they qualify for.
+- Resolved: enabling both `nello` and `nello_low` in the same game is legal, not a rule-set contradiction. They are two separately registered contracts, so a bidder names the doubles ranking they want by naming the contract; nothing about the game state is ambiguous. A table that plays only one way simply enables only one.
 - Resolved: marks-to-win is configurable per game, defaulting to 7.
 - Player identity/account model: email-based accounts, or something lighter (just a display name + secret game-join code) for MVP?

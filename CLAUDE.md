@@ -25,6 +25,11 @@ public `new_game`/`apply_move`/`legal_moves` entry points. See ROADMAP.md for th
 checklist. `projection.py` is still a Phase 1 stub - nothing under `storage/`, `api/` or `cli/`
 exists yet.
 
+Phase 0.5 (house rules) is the next phase, ahead of Phase 1: the config type is still named
+`RuleConfig` in `config.py`, and each contract's bid minimums are still class attributes rather
+than per-game options. DESIGN.md §5.1 defines the target model; ROADMAP.md Phase 0.5 breaks down
+the work. Until it lands, invariant 3 below describes the intent, not the code.
+
 ## Layout
 
 ```
@@ -32,7 +37,7 @@ src/t42/engine/     pure rules library (Phase 0 - complete)
     dominoes.py     the 28 tiles, a-b notation
     suits.py        trump membership, led suit, follow, ranking, doubles-own-suit variant
     scoring.py      count-domino values, hand point totals
-    config.py       per-game RuleConfig (rule variants)
+    config.py       per-game RuleConfig (rule variants); becomes house_rules.py in Phase 0.5
     trick_rules.py  shared follow-suit legality and highest-trump-or-led-suit winner
     contracts/      Contract protocol, name-keyed registry, all six contract strategies
     state.py        frozen dataclasses: GameState, HandState, Trick, PendingBid
@@ -73,8 +78,10 @@ These are the rules that keep the design working. Breaking one is a design chang
 2. **State is immutable.** State types are frozen dataclasses and functions return new state.
    Never mutate in place, so replay, caching and comparison stay sound.
 3. **Rule variants are per-game data, never globals.** Anything that differs between rule sets
-   lives on `RuleConfig` and is threaded through as an argument. Two games under different variants
-   must score and replay correctly in the same process.
+   lives on `HouseRules` and is threaded through as an argument. Two games under different variants
+   must score and replay correctly in the same process. This includes each contract's own terms:
+   a bid minimum belongs in `contract_options` (DESIGN.md §5.1), never as a class attribute on the
+   registered contract, because that singleton is shared by every game in the process.
 4. **Contracts are registered, not switched on.** Behaviour that differs between standard, nello,
    plunge, sevens and splash goes behind the `Contract` protocol in `contracts/`. Do not add
    `if contract == "nello"` branches to the bidding or trick code.
