@@ -1,0 +1,50 @@
+"""The engine's input alphabet: what a player can propose.
+
+A move is what a client submits (DESIGN.md §6); an :mod:`t42.engine.events` event is what the
+engine appends once a move is accepted.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Literal
+
+from .dominoes import Domino
+from .state import PlayerId
+from .suits import Trump
+
+
+@dataclass(frozen=True, slots=True)
+class PlaceBid:
+    """A numeric bid (30-42) or a mark bid for ``contract``."""
+
+    actor: PlayerId
+    contract: str | None = None
+    points: int | None = None
+    marks: int | None = None
+    kind: Literal["BID"] = "BID"
+
+
+@dataclass(frozen=True, slots=True)
+class Pass:
+    actor: PlayerId
+    kind: Literal["PASS"] = "PASS"
+
+
+@dataclass(frozen=True, slots=True)
+class DeclareContract:
+    """Post-auction declaration: trump choice, nello partner sit-out, plunge trump pick."""
+
+    actor: PlayerId
+    trump: Trump = None
+    kind: Literal["DECLARE_CONTRACT"] = "DECLARE_CONTRACT"
+
+
+@dataclass(frozen=True, slots=True)
+class PlayDomino:
+    actor: PlayerId
+    domino: Domino
+    kind: Literal["PLAY_DOMINO"] = "PLAY_DOMINO"
+
+
+type Move = PlaceBid | Pass | DeclareContract | PlayDomino
