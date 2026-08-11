@@ -32,6 +32,18 @@ class Pass:
 
 
 @dataclass(frozen=True, slots=True)
+class ConfirmBid:
+    """The partner's public accept/decline of a pending mark bid that needs confirmation (plunge).
+
+    Generic rather than plunge-specific, so any future contract needing this step reuses it.
+    """
+
+    actor: PlayerId
+    accept: bool
+    kind: Literal["CONFIRM_BID"] = "CONFIRM_BID"
+
+
+@dataclass(frozen=True, slots=True)
 class DeclareContract:
     """Post-auction declaration: trump choice, nello partner sit-out, plunge trump pick."""
 
@@ -47,4 +59,4 @@ class PlayDomino:
     kind: Literal["PLAY_DOMINO"] = "PLAY_DOMINO"
 
 
-type Move = PlaceBid | Pass | DeclareContract | PlayDomino
+type Move = PlaceBid | Pass | ConfirmBid | DeclareContract | PlayDomino

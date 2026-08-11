@@ -1,17 +1,18 @@
-"""Splash: like plunge with a higher double requirement; the partner names trump and leads.
-
-Off by default in :data:`~t42.engine.config.DEFAULT_CONTRACTS` until its scoring variant is
-settled (DESIGN.md §12), but registered so a game can enable it.
+"""Splash: bid 2+ marks holding at least 3 of the 7 doubles; the bidder's partner names trump and
+leads, same as plunge but with a lower bar and no confirmation step (DESIGN.md §12).
 """
 
 from __future__ import annotations
 
-from ._unimplemented import UnimplementedContract
+from ._partner_declares_common import PartnerDeclaresBase
 from .registry import register
 
 
-class SplashContract(UnimplementedContract):
+class SplashContract(PartnerDeclaresBase):
     name = "splash"
+    _minimum_doubles = 3
+    _minimum_marks = 2
+    _requires_confirmation = False
 
 
 register(SplashContract())

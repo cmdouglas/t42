@@ -164,7 +164,12 @@ None of these require touching the domain engine, persistence layer, or API cont
 
 ## 12. Open Questions
 
-- Resolved: doubles-as-own-suit and which special contracts are enabled are per-game configuration, set at creation (see sections 4.1, 5). Remaining question is just which contracts ship in Phase 0 vs. get added later — nello/plunge/sevens are already in scope; splash can likely be added in the same pass since it reuses the `Contract` interface.
-- Exact scoring variant to implement for plunge, sevens, and splash (regional rule variance is real — worth pinning down your preferred rule set before Phase 0).
+- Resolved: doubles-as-own-suit and which special contracts are enabled are per-game configuration, set at creation (see sections 4.1, 5). Six contracts ship in Phase 0: standard, nello, nello_low, sevens, plunge, splash.
+- Resolved: contract rule variants.
+  - **Nello / nello_low**: two separate registered contracts rather than one contract with a doubles-handling flag, since regional practice differs. `nello` (default, enabled by default): doubles form their own suit, ranked 6-6 high down to 0-0 low — fixed to this contract regardless of the game's `doubles_are_own_suit` flag. `nello_low`: doubles rank lowest in their number suit; off by default, enabled per game like splash. Both: declarer's partner sits out (hand is played 3-handed), declarer leads first, no trump, declarer's side must lose every trick or the bid is set.
+  - **Plunge**: bidder holds 4+ of the 7 doubles, bids 4+ marks, and the bid only becomes live once the bidder's partner explicitly agrees ("do you want to plunge?"). If declined, no bid was placed and the proposer bids again on the same turn. The proposal and the response are both public — ordinary events on the game log, visible to every seat, whether accepted or declined; this is table information, not a private channel between partners. On a made bid, the bidder's partner (not the bidder) names trump and leads the first trick.
+  - **Splash**: bidder holds 3+ of the 7 doubles, bids 2+ marks, no partner confirmation needed. Otherwise the same shape as plunge (partner names trump and leads). Off by default.
+  - **Sevens**: no trump. The trick winner is whichever played tile has pip-sum closest to 7; ties go to whichever tied tile was played earliest (a later play must strictly beat the standing winner, not just match it).
+  - **All-pass**: the dealer may not pass. If the other three seats have all passed, the dealer must place some legal bid — 30 points, or a mark bid for any contract they qualify for.
 - Resolved: marks-to-win is configurable per game, defaulting to 7.
 - Player identity/account model: email-based accounts, or something lighter (just a display name + secret game-join code) for MVP?

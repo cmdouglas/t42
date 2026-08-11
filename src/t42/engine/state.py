@@ -45,8 +45,20 @@ def team_of(seat: Seat) -> Team:
     return Team(seat % 2)
 
 
+def other_team(team: Team) -> Team:
+    return Team((team + 1) % 2)
+
+
 def partner_of(seat: Seat) -> Seat:
     return Seat((seat + 2) % 4)
+
+
+def seat_of(state: GameState, player_id: PlayerId) -> Seat:
+    """The seat a player occupies in this game. Raises ``KeyError`` if they are not seated."""
+    for seat, seated_player in state.players.items():
+        if seated_player == player_id:
+            return seat
+    raise KeyError(f"{player_id!r} is not seated in game {state.game_id!r}")
 
 
 @dataclass(frozen=True, slots=True)
@@ -78,9 +90,18 @@ class Trick:
     plays: tuple[PlayedDomino, ...] = ()
     winner: Seat | None = None
 
-    @property
-    def is_complete(self) -> bool:
-        return len(self.plays) == len(Seat)
+
+@dataclass(frozen=True, slots=True)
+class PendingBid:
+    """A mark bid awaiting the bidder's partner's confirmation (plunge) before it goes live.
+
+    The proposal that created this is already a public ``BidPlaced`` event on the log; this is
+    just in-memory state tracking where the auction is paused, not a hidden channel.
+    """
+
+    bidder: Seat
+    contract: str
+    marks: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -90,6 +111,7 @@ class HandState:
     dealer: Seat
     hands: Mapping[Seat, tuple[Domino, ...]] = field(default_factory=dict)
     bids: tuple[Bid, ...] = ()
+    pending_bid: PendingBid | None = None
     declarer: Seat | None = None
     contract: str | None = None
     trump: Trump = None

@@ -8,100 +8,51 @@ under "Done" below.
 
 ---
 
-## Phase 0: Rules engine
+## Phase 0: Rules engine — complete
 
 Goal: a pure library that can run a complete 4-player game in memory, with no network and no AWS.
-This is the highest-risk, most logic-dense phase; it is finished before any infrastructure exists.
+All six contracts (standard, nello, nello_low, sevens, plunge, splash) are implemented; a full
+game per contract runs end to end through `new_game`/`apply_move`/`legal_moves` in
+`tests/engine/test_full_game.py`, the Phase 0 milestone demo. The rule-variant decisions this
+phase depended on (0.1, below) are recorded in DESIGN.md §12.
 
 ### Done
 
 - `dominoes.py`: tile representation, normalized ends, `a-b` notation
 - `suits.py`: trump membership, led suit, follow legality, rank within a suit, doubles-as-own-suit
-  variant
+  variant, doubles-rank-low variant (for `nello_low`)
 - `scoring.py`: count values, 35 count + 7 tricks = 42
 - `config.py`: per-game `RuleConfig`
-- `contracts/registry.py`: name-keyed contract registry
-- `state.py` / `events.py` / `moves.py`: data shapes (may still shift as logic lands)
+- `trick_rules.py`: shared follow-suit legality and highest-trump-or-led-suit winner, reused by
+  every contract except sevens (its own pip-distance winner)
+- `contracts/`: registry plus all six strategies (`standard`, `nello`, `nello_low`, `sevens`,
+  `plunge`, `splash`)
+- `state.py` / `events.py` / `moves.py`: data shapes, including `PendingBid`/`ConfirmBid` for the
+  plunge confirmation sub-flow
+- `bidding.py`: full auction state machine - numeric and mark bids, plunge confirmation (public,
+  not a private channel - see DESIGN.md §12), the dealer-must-bid rule that replaces an all-pass
+  redeal
+- `tricks.py`: trick legality and resolution, active-seat-aware so nello's 3-handed hand closes
+  tricks at 3 plays instead of 4
+- `game.py`: `new_game`, `apply_move`, `legal_moves` - dealing, hand lifecycle, phase dispatch
 
-### 0.1 Pin the rule variants (blocking)
+### 0.1 Rule variants — resolved, see DESIGN.md §12
 
-DESIGN.md §12 leaves scoring variants open, and they change the shape of the contract
-implementations. Settle before writing 0.4:
+Plunge/splash doubles-and-marks minimums, nello's two doubles-ranking contracts, sevens'
+tie-breaking, and the dealer-must-bid all-pass rule are all recorded there.
 
-- Plunge: minimum doubles held (4 or 5), minimum mark bid, whether partner names trump and leads
-- Sevens: tie-breaking when two tiles sit equally far from seven; whether a trump exists at all
-- Splash: double requirement and mark minimum relative to plunge
-- Nello: doubles handling (own suit high, own suit low, or in their number suits) and whether it
-  is a fixed variant or another `RuleConfig` flag
-- Whether an all-pass auction re-deals or forces the dealer to bid 30
+### Exit criteria — met
 
-Record the decision in DESIGN.md §12 rather than only in code.
-
-### 0.2 Dealing and hand lifecycle
-
-`game.py: new_game()`, plus the hand loop.
-
-- Shuffle with an injected `random.Random` so deals are reproducible; deal 7 tiles per seat
-- Emit `HandDealt` capturing the deal, so a hand replays exactly from the event log
-- Advance dealer each hand; open the auction to the dealer's left
-- Hand completion: score, add marks, either start the next hand or move to `Phase.GAME_OVER`
-  at `config.marks_to_win`
-
-Tests: deal is a partition of `FULL_SET` (28 tiles, no duplicates, 7 per seat); same seed gives the
-same deal; dealer and turn order rotate correctly across several hands.
-
-### 0.3 Bidding state machine
-
-`bidding.py`, in order: `legal_bids` → `apply_bid` → `auction_is_settled` → `resolve_auction`.
-
-- Numeric bids 30 to 42, each strictly above the previous; mark bids above those
-- Mark bids carry the contract they are for, filtered by `config.enabled_contracts` and by the
-  bidder's hand where the contract demands it (plunge, splash)
-- Pass handling, out-of-turn rejection, all-pass resolution per 0.1
-- `resolve_auction` sets declarer, winning bid and contract, and moves to `Phase.DECLARING`
-
-Tests (table-driven): every legal and illegal bid at each auction position; out-of-turn; bidding
-a disabled contract; plunge bid without the required doubles; all-pass; the auction as a whole
-producing the right declarer.
-
-### 0.4 Contract strategies
-
-Implement against the `Contract` protocol, dropping the `UnimplementedContract` base as each
-lands. Order: `standard` first (the others are defined by how they differ from it), then `nello`,
-`sevens`, `plunge`, `splash`.
-
-Each needs: `validate_bid`, `requires_declaration`, `opening_leader`, `sits_out`, `legal_plays`,
-`trick_winner`, `score_hand`.
-
-Tests per contract: a full scripted hand with known tiles and a known outcome, plus the scoring
-boundary cases (bid exactly made, set by one point, all seven tricks).
-
-### 0.5 Trick engine
-
-`tricks.py`, delegating contract-specific behaviour to the active strategy rather than branching.
-
-- `legal_plays`: whole hand when leading; tiles of the led suit when following and holding any
-- `trick_winner`: highest trump, else highest tile of the led suit
-- `play`: validate, append to the trick, close the trick and set the next leader, close the hand
-  after seven tricks
-
-Tests: follow-suit obligation under both doubles variants; trump beating a higher off-suit tile;
-the trump double; a tile with two ends where only one follows; sevens ranking; property test that
-across the 28 tiles exactly one seat wins every well-formed trick.
-
-### 0.6 In-memory game demo
-
-A test (not a script) that plays a full game from `new_game` to `Phase.GAME_OVER` through
-`apply_move` with a seeded RNG and a scripted or simple-heuristic player. This is the DESIGN.md
-§10 Phase 0 milestone and doubles as a regression net for later phases.
-
-### Exit criteria
-
-- A whole game runs end to end in memory, all contracts enabled
-- Illegal moves raise `RulesError`, never corrupt state
+- A whole game runs end to end in memory, for every one of the six contracts
+- Illegal moves raise `RulesError`, never corrupt state (state is immutable throughout; verified)
 - No I/O, no AWS import anywhere under `t42.engine`
-- Coverage of the rules modules is high enough that the scoring and follow-suit branches are
-  exercised deliberately, not incidentally
+- The rules modules carry the heaviest test investment: scoring boundaries, follow-suit edge
+  cases, and a property test that a trick always has exactly one winner
+
+### Still open (tracked, not blocking)
+
+`projection.py` is a Phase 1 stub - the player-specific view lands with persistence, since it's
+naturally exercised against a real game log (see Phase 1, 1.5 below).
 
 ---
 

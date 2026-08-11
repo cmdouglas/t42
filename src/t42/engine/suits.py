@@ -7,7 +7,7 @@ per-game ``doubles_are_own_suit`` variant, so every function here takes both.
 from __future__ import annotations
 
 from enum import IntEnum
-from typing import Final
+from typing import Final, Literal
 
 from .config import RuleConfig
 from .dominoes import Domino
@@ -33,6 +33,10 @@ type Trump = Suit | None
 
 #: Rank of a double within its own number suit - above every non-double in that suit.
 _DOUBLE_RANK: Final = 7
+
+#: Whether a double ranks above or below the rest of its number suit. Only nello_low uses "low" -
+#: every trump-based contract and the default nello use the "high" default.
+type DoublesRank = Literal["high", "low"]
 
 
 def is_trump(domino: Domino, trump: Trump, config: RuleConfig) -> bool:
@@ -84,16 +88,19 @@ def follows(domino: Domino, suit: Suit, trump: Trump, config: RuleConfig) -> boo
     return belongs_to(domino, suit, config)
 
 
-def rank_in_suit(domino: Domino, suit: Suit, config: RuleConfig) -> int:
+def rank_in_suit(
+    domino: Domino, suit: Suit, config: RuleConfig, *, doubles_rank: DoublesRank = "high"
+) -> int:
     """Rank of ``domino`` within ``suit``; higher beats lower. Only meaningful within one suit.
 
-    Within a number suit the double is highest and the rest rank by their off end. Within the
-    doubles suit, ``6-6`` is highest down to ``0-0``.
+    Within a number suit the double ranks per ``doubles_rank`` (highest, by default) and the rest
+    rank by their off end. Within the doubles suit, ``6-6`` is highest down to ``0-0`` regardless
+    - ``doubles_rank`` only matters when doubles share a suit with non-doubles.
     """
     if not belongs_to(domino, suit, config):
         raise ValueError(f"{domino} is not in suit {suit.name}")
     if suit is Suit.DOUBLES:
         return domino.high
     if domino.is_double:
-        return _DOUBLE_RANK
+        return _DOUBLE_RANK if doubles_rank == "high" else -1
     return domino.low if domino.high == suit else domino.high

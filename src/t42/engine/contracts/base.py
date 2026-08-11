@@ -21,12 +21,23 @@ class Contract(Protocol):
     #: Registry key, and the value stored in events and state.
     name: str
 
-    def validate_bid(self, bid: Bid, config: RuleConfig) -> None:
-        """Reject bids this contract cannot be bid at. Raises ``IllegalMove``."""
+    def validate_bid(self, bid: Bid, hand: tuple[Domino, ...], config: RuleConfig) -> None:
+        """Reject bids this contract cannot be bid at, given the bidder's hand. Raises
+        ``IllegalMove`` (doubles-in-hand requirements for plunge and splash live here)."""
+        ...
+
+    def requires_partner_confirmation(self) -> bool:
+        """Whether the bidder's partner must explicitly accept this bid before it goes live
+        (plunge). The propose/accept-or-decline exchange is always public regardless."""
         ...
 
     def requires_declaration(self) -> bool:
-        """Whether the declarer must declare something (trump, partner sit-out) before play."""
+        """Whether the declaring seat must declare something (trump, sit-out) before play."""
+        ...
+
+    def declaring_seat(self, state: GameState) -> Seat:
+        """Who acts during ``Phase.DECLARING``: the bidder, except for plunge/splash where it is
+        the bidder's partner."""
         ...
 
     def opening_leader(self, state: GameState) -> Seat:

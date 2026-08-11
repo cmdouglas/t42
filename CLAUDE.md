@@ -18,34 +18,35 @@ is not a concern.
 
 ## Current status
 
-Phase 0 (pure rules engine) is in progress. Implemented and tested: tile representation and
-notation, suit and trump logic including the doubles-as-own-suit variant, count values,
-`RuleConfig`, and the contract registry. Stubbed with signatures in place and raising
-`NotImplementedError`: the bidding state machine, trick engine, all five contract strategies,
-projection, and the `game.py` entry points. Nothing under `storage/`, `api/` or `cli/` exists yet.
+Phase 0 (pure rules engine) is complete: dealing, bidding (including the plunge confirmation
+sub-flow and the dealer-must-bid all-pass rule), all six contracts (standard, nello, nello_low,
+sevens, plunge, splash), the trick engine, and a full in-memory game per contract, all through the
+public `new_game`/`apply_move`/`legal_moves` entry points. See ROADMAP.md for the exit-criteria
+checklist. `projection.py` is still a Phase 1 stub - nothing under `storage/`, `api/` or `cli/`
+exists yet.
 
 ## Layout
 
 ```
-src/t42/engine/     pure rules library (Phase 0)
-    dominoes.py     the 28 tiles, a-b notation                       IMPLEMENTED
-    suits.py        trump membership, led suit, follow, ranking      IMPLEMENTED
-    scoring.py      count-domino values, hand point totals           IMPLEMENTED
-    config.py       per-game RuleConfig (rule variants)              IMPLEMENTED
-    contracts/      Contract protocol + name-keyed registry          registry IMPLEMENTED,
-                                                                     strategies stubbed
-    state.py        frozen dataclasses: GameState, HandState, Trick
+src/t42/engine/     pure rules library (Phase 0 - complete)
+    dominoes.py     the 28 tiles, a-b notation
+    suits.py        trump membership, led suit, follow, ranking, doubles-own-suit variant
+    scoring.py      count-domino values, hand point totals
+    config.py       per-game RuleConfig (rule variants)
+    trick_rules.py  shared follow-suit legality and highest-trump-or-led-suit winner
+    contracts/      Contract protocol, name-keyed registry, all six contract strategies
+    state.py        frozen dataclasses: GameState, HandState, Trick, PendingBid
     events.py       immutable log events (the persistence contract)
     moves.py        what a client may propose
-    bidding.py      auction state machine                            stub
-    tricks.py       trick legality and resolution                    stub
-    projection.py   player-specific view                             stub
-    game.py         new_game / apply_move / legal_moves entry points stub
+    bidding.py      auction state machine, incl. plunge confirmation and dealer-must-bid
+    tricks.py       trick legality and resolution, active-seat-aware for nello's 3-handed hands
+    game.py         new_game / apply_move / legal_moves entry points
     errors.py       RulesError, IllegalMove, OutOfTurn, UnknownContract
+    projection.py   player-specific view                                   stub (Phase 1)
 src/t42/storage/    DynamoDB event log + materialized state   (Phase 1, not created)
 src/t42/api/        Lambda handlers behind API Gateway        (Phase 2, not created)
 src/t42/cli/        thin command-line client                  (Phase 3, not created)
-tests/engine/       mirrors the engine modules
+tests/engine/       mirrors the engine modules; test_full_game.py is the Phase 0 milestone demo
 ```
 
 ## Commands
@@ -90,6 +91,7 @@ These are the rules that keep the design working. Breaking one is a design chang
 - Tests are table-driven or property-based where the input space is enumerable; the engine gets the
   heaviest test investment, since this is where domino implementations go subtly wrong.
 - Stubs raise `NotImplementedError("Phase N: <what>")` and have no tests written against them, so a
-  green suite always means what it says.
-- Do not pre-decide the rule variants that DESIGN.md §12 leaves open (plunge and sevens scoring,
-  nello doubles handling, all-pass behaviour). Settle them there first, then implement.
+  green suite always means what it says. Only `projection.py` is still a stub.
+- Contract rule variants (plunge/splash doubles-and-marks minimums, nello doubles handling,
+  sevens tie-breaking, all-pass) are resolved and recorded in DESIGN.md §12 - read there before
+  assuming a different regional rule.

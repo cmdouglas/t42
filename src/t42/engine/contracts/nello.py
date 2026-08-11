@@ -1,17 +1,19 @@
-"""Nello: the declarer's partner sits out and the declarer must lose every trick.
+"""Nello (default doubles-own-suit variant): partner sits out, no trump.
 
-Open questions to settle before implementing: doubles handling under nello (own suit, high or
-low) is a per-game variant in some rule sets - see DESIGN.md §12.
+Doubles form their own suit, ranked 6-6 high down to 0-0 low. See ``nello_low.py`` for the
+doubles-rank-low variant and DESIGN.md §12 for why these are two contracts, not a flag.
 """
 
 from __future__ import annotations
 
-from ._unimplemented import UnimplementedContract
+from ._nello_common import NelloBase
 from .registry import register
 
 
-class NelloContract(UnimplementedContract):
+class NelloContract(NelloBase):
     name = "nello"
+    _doubles_are_own_suit = True
+    _doubles_rank = "high"  # moot: doubles form their own suit, so number-suit rank never applies
 
 
 register(NelloContract())

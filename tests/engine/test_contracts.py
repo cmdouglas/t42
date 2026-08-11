@@ -8,7 +8,14 @@ from t42.engine.errors import UnknownContract
 
 
 def test_every_designed_contract_is_registered() -> None:
-    assert contracts.available() == ("nello", "plunge", "sevens", "splash", "standard")
+    assert contracts.available() == (
+        "nello",
+        "nello_low",
+        "plunge",
+        "sevens",
+        "splash",
+        "standard",
+    )
 
 
 @pytest.mark.parametrize("name", contracts.available())

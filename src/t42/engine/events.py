@@ -39,6 +39,16 @@ class Passed:
 
 
 @dataclass(frozen=True, slots=True)
+class BidConfirmed:
+    """Public accept/decline of a pending bid (plunge). Logged unconditionally, never suppressed
+    on decline - that a plunge was proposed and how the partner answered is table information."""
+
+    actor: PlayerId
+    accept: bool
+    type: Literal["BID_CONFIRMED"] = "BID_CONFIRMED"
+
+
+@dataclass(frozen=True, slots=True)
 class ContractDeclared:
     actor: PlayerId
     contract: str
@@ -53,4 +63,4 @@ class DominoPlayed:
     type: Literal["PLAY_DOMINO"] = "PLAY_DOMINO"
 
 
-type Event = HandDealt | BidPlaced | Passed | ContractDeclared | DominoPlayed
+type Event = HandDealt | BidPlaced | Passed | BidConfirmed | ContractDeclared | DominoPlayed
