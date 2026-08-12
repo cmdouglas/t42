@@ -104,10 +104,13 @@ def drive_to_game_over(
     *,
     max_moves: int = 500,
     on_state: Callable[[GameState], None] | None = None,
+    on_transition: Callable[[GameState, Move, GameState], None] | None = None,
 ) -> GameState:
     """Play ``state`` to ``GAME_OVER``. ``on_state``, if given, is called with the state produced
     by every move - the hook the codec round-trip test uses to snapshot every phase a real game
-    passes through, rather than just the final one."""
+    passes through, rather than just the final one. ``on_transition``, if given, is called with
+    ``(state_before, move, state_after)`` - the replay test uses this to build the event log a
+    move produces, which needs the state the move was applied *to* as well as its result."""
     for _ in range(max_moves):
         if state.phase is Phase.GAME_OVER:
             return state
@@ -116,7 +119,10 @@ def drive_to_game_over(
         options = legal_moves(state, player_of(seat))
         assert options, f"{player_of(seat)} has no legal moves in {state.phase}"
         move = choose(state, options)
+        state_before = state
         state = apply_move(state, move, rng=rng)
         if on_state is not None:
             on_state(state)
+        if on_transition is not None:
+            on_transition(state_before, move, state)
     raise AssertionError(f"game did not reach GAME_OVER within {max_moves} moves")

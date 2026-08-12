@@ -34,14 +34,27 @@ plunge/splash doubles-and-marks minimums and the nello/nello_low/sevens mark flo
 of a two-ended tile is the suit led, recorded on `Trick.declared_suit` and read through
 `trick_rules.suit_led` rather than derived.
 
-Phase 1 (persistence) is under way. 1.1 (item shapes and codec) is complete: `t42.storage.codec`
-encodes and decodes `GameState`, `HouseRules` and every `Event` to the plain
-dict/list/str/int/bool/None shapes boto3's resource-level `Table` API accepts directly, with no
-boto3 dependency and no database - proven by a round-trip property test in `tests/storage/` that
-drives real games (all six contracts, plunge confirmation, declared leads) through `new_game`/
-`apply_move` and asserts `decode(encode(x)) == x` on every intermediate state. Event emission is
-not yet wired into `apply_move` - nothing constructs `Event` instances outside tests yet - and
-replay (1.2) and the repository (1.3, first real boto3 dependency) are next - see ROADMAP.md.
+Phase 1 (persistence) is under way, still with no boto3 dependency or database.
+
+1.1 (item shapes and codec) is complete: `t42.storage.codec` encodes and decodes `GameState`,
+`HouseRules` and every `Event` to the plain dict/list/str/int/bool/None shapes boto3's
+resource-level `Table` API accepts directly, proven by a round-trip property test in
+`tests/storage/` that drives real games through `new_game`/`apply_move` and asserts
+`decode(encode(x)) == x` on every intermediate state.
+
+1.2 (replay) is complete. `apply_move` still doesn't emit events itself (unchanged, and still
+deliberately out of scope - see 1.1's note above, now resolved by construction rather than
+wired-in), so `t42.storage.events` supplies the write direction: `event_for_move`/
+`hand_dealt_event`/`events_for_move` translate an accepted move (and any deal it triggers) into
+the `Event`(s) it produces. `t42.storage.replay.replay(game_id, players, config, events)` is the
+read direction, rebuilding a `GameState` by feeding events back through real `new_game`/
+`apply_move` calls - not a parallel reimplementation - using `_ReplayRandom`, a `Random` subclass
+whose `shuffle` deterministically replays each `HandDealt` event's recorded deal instead of
+randomizing, so dealing runs through its real code path even though the outcome is fixed by
+history. Proven against real games (all six contracts, plunge confirmation, declared leads, and a
+multi-hand random smoke test) in `tests/storage/test_replay.py`.
+
+Repository writes (1.3, the first real boto3 dependency) are next - see ROADMAP.md.
 
 ## Layout
 
@@ -63,11 +76,14 @@ src/t42/engine/     pure rules library (Phase 0 - complete)
     projection.py   player-specific view                                   stub (Phase 1)
 src/t42/storage/    DynamoDB event log + materialized state   (Phase 1, in progress)
     codec.py        GameState/HouseRules/Event <-> plain attribute maps (1.1 - complete)
+    events.py       move/deal -> Event (write direction)                (1.2 - complete)
+    replay.py       Event log -> GameState via real new_game/apply_move (1.2 - complete)
 src/t42/api/        Lambda handlers behind API Gateway        (Phase 2, not created)
 src/t42/cli/        thin command-line client                  (Phase 3, not created)
 tests/engine/       mirrors the engine modules; test_full_game.py is the Phase 0 milestone demo;
-                    _helpers.py's `drive_to_game_over`/`prefer_contract` are reused by
-                    tests/storage/ to generate real states for the codec round-trip test
+                    _helpers.py's `drive_to_game_over`/`prefer_contract` (plus its `on_state`/
+                    `on_transition` hooks) are reused by tests/storage/ to generate real games for
+                    the codec and replay round-trip tests
 tests/storage/      mirrors src/t42/storage/
 ```
 
