@@ -8,6 +8,7 @@ from t42.engine.suits import (
     NUMBER_SUITS,
     Suit,
     belongs_to,
+    declarable_suits,
     follows,
     is_trump,
     led_suit,
@@ -69,6 +70,22 @@ class TestLedSuit:
         for config in (PLAIN, DOUBLES_SUIT):
             for trump in (None, *NUMBER_SUITS):
                 assert all(isinstance(led_suit(d, trump, config), Suit) for d in FULL_SET)
+
+
+class TestDeclarableSuits:
+    def test_a_two_ended_tile_offers_its_low_end_as_the_one_alternative(self) -> None:
+        assert declarable_suits(Domino(3, 2), None, PLAIN) == (Suit.DEUCES,)
+
+    def test_a_double_offers_no_declaration_regardless_of_the_variant(self) -> None:
+        assert declarable_suits(Domino(3, 3), None, PLAIN) == ()
+        assert declarable_suits(Domino(3, 3), None, DOUBLES_SUIT) == ()
+
+    def test_a_trump_tile_offers_no_declaration(self) -> None:
+        assert declarable_suits(Domino(6, 4), Suit.SIXES, PLAIN) == ()
+        assert declarable_suits(Domino(6, 4), Suit.FOURS, PLAIN) == ()
+
+    def test_an_off_suit_tile_still_offers_its_low_end_under_trump(self) -> None:
+        assert declarable_suits(Domino(6, 4), Suit.FIVES, PLAIN) == (Suit.FOURS,)
 
 
 class TestFollows:

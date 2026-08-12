@@ -20,6 +20,12 @@ def test_defaults_match_the_design() -> None:
     assert not config.doubles_are_own_suit
     assert config.enabled_contracts == frozenset({"standard", "nello", "plunge", "sevens"})
     assert config.contract_options == {}
+    assert config.allow_declared_lead == "never"
+
+
+def test_an_invalid_allow_declared_lead_value_is_rejected() -> None:
+    with pytest.raises(ValueError, match="allow_declared_lead"):
+        HouseRules(allow_declared_lead="sometimes")  # type: ignore[arg-type]
 
 
 def test_allows_reports_enabled_contracts() -> None:

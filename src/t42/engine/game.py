@@ -27,7 +27,7 @@ from .state import (
     Team,
     seat_of,
 )
-from .suits import NUMBER_SUITS, Suit, Trump
+from .suits import NUMBER_SUITS, Suit, Trump, declarable_suits
 
 
 def new_game(
@@ -121,7 +121,16 @@ def legal_moves(state: GameState, player_id: PlayerId) -> tuple[Move, ...]:
         playable = tricks.legal_plays(
             hand.hands[state.to_act], hand.current_trick, hand.trump, state.config, contract
         )
-        return tuple(PlayDomino(actor=player_id, domino=domino) for domino in playable)
+        leading = not hand.current_trick.plays
+        play_moves: list[Move] = []
+        for domino in playable:
+            play_moves.append(PlayDomino(actor=player_id, domino=domino))
+            if leading and tricks.declared_lead_permitted(state.config, hand):
+                for suit in declarable_suits(domino, hand.trump, state.config):
+                    play_moves.append(
+                        PlayDomino(actor=player_id, domino=domino, declared_suit=suit)
+                    )
+        return tuple(play_moves)
 
     return ()
 

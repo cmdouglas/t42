@@ -11,7 +11,7 @@ from typing import Literal
 
 from .dominoes import Domino
 from .state import PlayerId, Seat
-from .suits import Trump
+from .suits import Suit, Trump
 
 
 @dataclass(frozen=True, slots=True)
@@ -58,8 +58,12 @@ class ContractDeclared:
 
 @dataclass(frozen=True, slots=True)
 class DominoPlayed:
+    """Must carry ``declared_suit`` (DESIGN.md §5.2): once a declaration is possible, the led
+    suit is a decision, not a function of the tile, so a log without it cannot be replayed."""
+
     actor: PlayerId
     domino: Domino
+    declared_suit: Suit | None = None
     type: Literal["PLAY_DOMINO"] = "PLAY_DOMINO"
 
 

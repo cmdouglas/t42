@@ -25,13 +25,14 @@ public `new_game`/`apply_move`/`legal_moves` entry points. See ROADMAP.md for th
 checklist. `projection.py` is still a Phase 1 stub - nothing under `storage/`, `api/` or `cli/`
 exists yet.
 
-Phase 0.5 (house rules) is next, ahead of Phase 1. Steps 0.5.1-0.5.4 are complete: the rule-config
-type is `HouseRules` in `house_rules.py`, each contract declares its own options through
-`option_defaults()`/`validate_options()` (the plunge/splash doubles-and-marks minimums and the
-nello/nello_low/sevens mark floor all live in `contract_options` now, not as class attributes),
-and `new_game` rejects an invalid house-rule set via `contracts.validate_house_rules` before a game
-is ever created. Only 0.5.5 (declared leads) remains before the phase closes out; DESIGN.md §5.2
-and ROADMAP.md's "0.5.5" define it.
+Phase 0.5 (house rules) is complete, ahead of Phase 1. The rule-config type is `HouseRules` in
+`house_rules.py`; each contract declares its own options through `option_defaults()`/
+`validate_options()` (the plunge/splash doubles-and-marks minimums and the nello/nello_low/sevens
+mark floor all live in `contract_options`, not as class attributes); `new_game` rejects an invalid
+house-rule set via `contracts.validate_house_rules` before a game is ever created; and declared
+leads (`allow_declared_lead`: `never`/`first_trick`/`always`, DESIGN.md §5.2) let a leader name
+which end of a two-ended tile is the suit led, recorded on `Trick.declared_suit` and read through
+`trick_rules.suit_led` rather than derived. Phase 1 (persistence) is next - see ROADMAP.md.
 
 ## Layout
 

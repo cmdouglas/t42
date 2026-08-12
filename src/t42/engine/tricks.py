@@ -18,8 +18,8 @@ from .errors import IllegalMove, OutOfTurn
 from .house_rules import HouseRules
 from .moves import PlayDomino
 from .scoring import TRICKS_PER_HAND
-from .state import GameState, Phase, PlayedDomino, Seat, Trick, seat_of
-from .suits import Trump
+from .state import GameState, HandState, Phase, PlayedDomino, Seat, Trick, seat_of
+from .suits import Trump, declarable_suits
 
 
 def legal_plays(
@@ -36,6 +36,29 @@ def legal_plays(
 def trick_winner(trick: Trick, trump: Trump, config: HouseRules, contract: Contract) -> Seat:
     """The seat that wins a completed trick under ``contract``."""
     return contract.trick_winner(trick, trump, config)
+
+
+def declared_lead_permitted(config: HouseRules, hand: HandState) -> bool:
+    """Whether a declaration is allowed on the hand's current trick, per ``allow_declared_lead``
+    (DESIGN.md §5.2). Shared by the play-time validator and ``game.legal_moves`` so the two can
+    never disagree about what's on offer."""
+    if config.allow_declared_lead == "never":
+        return False
+    if config.allow_declared_lead == "first_trick":
+        return not hand.completed_tricks
+    return True
+
+
+def _validate_declaration(hand: HandState, config: HouseRules, move: PlayDomino) -> None:
+    """Reject an illegal declaration. Never compulsory - a play with none is always fine."""
+    if move.declared_suit is None:
+        return
+    if hand.current_trick.plays:
+        raise IllegalMove("only the leader may declare a suit")
+    if not declared_lead_permitted(config, hand):
+        raise IllegalMove("declared leads are not allowed under these house rules")
+    if move.declared_suit not in declarable_suits(move.domino, hand.trump, config):
+        raise IllegalMove(f"{move.domino} cannot be declared as {move.declared_suit.name}")
 
 
 def play(state: GameState, move: PlayDomino) -> GameState:
@@ -56,19 +79,22 @@ def play(state: GameState, move: PlayDomino) -> GameState:
     if move.domino not in playable:
         raise IllegalMove(f"{move.domino} does not follow suit")
 
+    _validate_declaration(hand, state.config, move)
+
     new_hands = dict(hand.hands)
     new_hands[actor_seat] = tuple(d for d in seat_hand if d != move.domino)
     new_plays = (*hand.current_trick.plays, PlayedDomino(seat=actor_seat, domino=move.domino))
+    leading = not hand.current_trick.plays
+    declared_suit = move.declared_suit if leading else hand.current_trick.declared_suit
+    new_trick = replace(hand.current_trick, plays=new_plays, declared_suit=declared_suit)
 
     active = _active_seats(state, contract)
     if len(new_plays) < len(active):
-        new_hand = replace(
-            hand, hands=new_hands, current_trick=replace(hand.current_trick, plays=new_plays)
-        )
+        new_hand = replace(hand, hands=new_hands, current_trick=new_trick)
         return replace(state, hand=new_hand, to_act=_next_active_seat(actor_seat, active))
 
-    winner = trick_winner(Trick(plays=new_plays), hand.trump, state.config, contract)
-    completed_trick = Trick(plays=new_plays, winner=winner)
+    winner = trick_winner(new_trick, hand.trump, state.config, contract)
+    completed_trick = replace(new_trick, winner=winner)
     new_completed = (*hand.completed_tricks, completed_trick)
 
     if len(new_completed) == TRICKS_PER_HAND:

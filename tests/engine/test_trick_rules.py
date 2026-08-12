@@ -7,14 +7,27 @@ from t42.engine.dominoes import FULL_SET, Domino
 from t42.engine.house_rules import HouseRules
 from t42.engine.state import PlayedDomino, Seat, Trick
 from t42.engine.suits import NUMBER_SUITS, Suit
-from t42.engine.trick_rules import follow_suit_plays, highest_trump_or_led_suit_wins
+from t42.engine.trick_rules import follow_suit_plays, highest_trump_or_led_suit_wins, suit_led
 
 PLAIN = HouseRules()
 DOUBLES_SUIT = HouseRules(doubles_are_own_suit=True)
 
 
-def _trick(*plays: tuple[Seat, Domino]) -> Trick:
-    return Trick(plays=tuple(PlayedDomino(seat=seat, domino=domino) for seat, domino in plays))
+def _trick(*plays: tuple[Seat, Domino], declared_suit: Suit | None = None) -> Trick:
+    return Trick(
+        plays=tuple(PlayedDomino(seat=seat, domino=domino) for seat, domino in plays),
+        declared_suit=declared_suit,
+    )
+
+
+class TestSuitLed:
+    def test_falls_back_to_led_suit_when_nothing_was_declared(self) -> None:
+        trick = _trick((Seat.NORTH, Domino(3, 2)))
+        assert suit_led(trick, None, PLAIN) is Suit.TREYS
+
+    def test_returns_the_declaration_when_one_was_made(self) -> None:
+        trick = _trick((Seat.NORTH, Domino(3, 2)), declared_suit=Suit.DEUCES)
+        assert suit_led(trick, None, PLAIN) is Suit.DEUCES
 
 
 class TestFollowSuitPlays:
@@ -48,6 +61,12 @@ class TestFollowSuitPlays:
         hand = (Domino(6, 6), Domino(5, 4), Domino(3, 1))
         # 5-4 contains a five but is not itself a double, so it does not follow doubles.
         assert follow_suit_plays(hand, trick, None, DOUBLES_SUIT) == (Domino(6, 6),)
+
+    def test_a_declared_suit_changes_what_follows(self) -> None:
+        # 6-5 defaults to leading sixes; declared as fives, a five-holder must follow instead.
+        trick = _trick((Seat.NORTH, Domino(6, 5)), declared_suit=Suit.FIVES)
+        hand = (Domino(6, 2), Domino(5, 1))
+        assert follow_suit_plays(hand, trick, None, PLAIN) == (Domino(5, 1),)
 
 
 class TestHighestTrumpOrLedSuitWins:
@@ -85,6 +104,19 @@ class TestHighestTrumpOrLedSuitWins:
         )
         assert highest_trump_or_led_suit_wins(trick, None, PLAIN, doubles_rank="high") is Seat.EAST
         assert highest_trump_or_led_suit_wins(trick, None, PLAIN, doubles_rank="low") is Seat.NORTH
+
+    def test_a_declared_suit_can_change_the_winner(self) -> None:
+        plays = (
+            (Seat.NORTH, Domino(6, 5)),  # led
+            (Seat.EAST, Domino(6, 0)),  # belongs to sixes only
+            (Seat.SOUTH, Domino(5, 5)),  # belongs to fives only, and it's the double
+            (Seat.WEST, Domino(4, 1)),  # belongs to neither, sloughed
+        )
+        default_trick = _trick(*plays)
+        assert highest_trump_or_led_suit_wins(default_trick, None, PLAIN) is Seat.NORTH
+
+        declared_trick = _trick(*plays, declared_suit=Suit.FIVES)
+        assert highest_trump_or_led_suit_wins(declared_trick, None, PLAIN) is Seat.SOUTH
 
     @given(
         st.permutations(FULL_SET).map(lambda tiles: tiles[:4]),

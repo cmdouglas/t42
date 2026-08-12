@@ -69,6 +69,18 @@ def led_suit(domino: Domino, trump: Trump, config: HouseRules) -> Suit:
     return Suit(domino.high)
 
 
+def declarable_suits(domino: Domino, trump: Trump, config: HouseRules) -> tuple[Suit, ...]:
+    """The non-default suit(s) ``domino`` may be declared as when leading it (DESIGN.md §5.2).
+
+    Empty for a double or a trump tile - both offer no choice. Otherwise a single suit: the low
+    end. The default (no declaration) already reads as the high end via :func:`led_suit`, so this
+    is the one *additional* option a leader has, not a third alternative alongside it.
+    """
+    if domino.is_double or is_trump(domino, trump, config):
+        return ()
+    return (Suit(domino.low),)
+
+
 def belongs_to(domino: Domino, suit: Suit, config: HouseRules) -> bool:
     """Whether ``domino`` is a member of ``suit``, ignoring trump."""
     if suit is Suit.DOUBLES:

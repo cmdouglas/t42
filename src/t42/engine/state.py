@@ -13,7 +13,7 @@ from enum import IntEnum, StrEnum
 
 from .dominoes import Domino
 from .house_rules import HouseRules
-from .suits import Trump
+from .suits import Suit, Trump
 
 type PlayerId = str
 type GameId = str
@@ -88,6 +88,10 @@ class PlayedDomino:
 @dataclass(frozen=True, slots=True)
 class Trick:
     plays: tuple[PlayedDomino, ...] = ()
+    #: The leader's declared suit, if they made one (DESIGN.md §5.2). ``None`` means "apply the
+    #: default higher-end rule" - the suit is then no longer recoverable from the tile alone, so
+    #: this rides on the trick rather than being derived.
+    declared_suit: Suit | None = None
     winner: Seat | None = None
 
 

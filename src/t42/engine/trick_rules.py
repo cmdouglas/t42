@@ -12,7 +12,15 @@ from __future__ import annotations
 from .dominoes import Domino
 from .house_rules import HouseRules
 from .state import Seat, Trick
-from .suits import DoublesRank, Trump, belongs_to, follows, is_trump, led_suit, rank_in_suit
+from .suits import DoublesRank, Suit, Trump, belongs_to, follows, is_trump, led_suit, rank_in_suit
+
+
+def suit_led(trick: Trick, trump: Trump, config: HouseRules) -> Suit:
+    """The suit ``trick``'s lead establishes: the leader's declaration if they made one
+    (DESIGN.md §5.2), else the default higher-end reading."""
+    if trick.declared_suit is not None:
+        return trick.declared_suit
+    return led_suit(trick.plays[0].domino, trump, config)
 
 
 def follow_suit_plays(
@@ -21,7 +29,7 @@ def follow_suit_plays(
     """The standard follow-suit rule: lead anything; otherwise the led suit if you hold it."""
     if not trick.plays:
         return hand
-    led = led_suit(trick.plays[0].domino, trump, config)
+    led = suit_led(trick, trump, config)
     following = tuple(domino for domino in hand if follows(domino, led, trump, config))
     return following if following else hand
 
@@ -34,7 +42,7 @@ def highest_trump_or_led_suit_wins(
     the no-trump contracts' rule (nello, nello_low, sevens' follow-suit legality if not its
     winner)."""
     assert trick.plays, "trick_winner called on an empty trick"
-    led = led_suit(trick.plays[0].domino, trump, config)
+    led = suit_led(trick, trump, config)
 
     trump_plays = [play for play in trick.plays if is_trump(play.domino, trump, config)]
     if trump_plays:

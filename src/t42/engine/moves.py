@@ -11,7 +11,7 @@ from typing import Literal
 
 from .dominoes import Domino
 from .state import PlayerId
-from .suits import Trump
+from .suits import Suit, Trump
 
 
 @dataclass(frozen=True, slots=True)
@@ -54,8 +54,12 @@ class DeclareContract:
 
 @dataclass(frozen=True, slots=True)
 class PlayDomino:
+    """Leading, ``declared_suit`` may name a non-default reading of a two-ended tile (DESIGN.md
+    §5.2); never compulsory, and only meaningful when this is the trick's opening play."""
+
     actor: PlayerId
     domino: Domino
+    declared_suit: Suit | None = None
     kind: Literal["PLAY_DOMINO"] = "PLAY_DOMINO"
 
 

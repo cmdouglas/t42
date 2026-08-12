@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from typing import Final
+from typing import Final, Literal
 
 from .errors import UnknownContract
 
@@ -24,6 +24,11 @@ DEFAULT_MARKS_TO_WIN: Final = 7
 #: special case for it.
 OptionValue = int | bool | str
 
+#: How far the declared-lead privilege extends (DESIGN.md §5.2): never at all, only on a hand's
+#: first trick, or on any trick the declarer leads.
+AllowDeclaredLead = Literal["never", "first_trick", "always"]
+_ALLOW_DECLARED_LEAD_VALUES: Final = ("never", "first_trick", "always")
+
 
 @dataclass(frozen=True, slots=True)
 class HouseRules:
@@ -37,6 +42,7 @@ class HouseRules:
     enabled_contracts: frozenset[str] = DEFAULT_CONTRACTS
     contract_options: Mapping[str, Mapping[str, OptionValue]] = field(default_factory=dict)
     doubles_are_own_suit: bool = False
+    allow_declared_lead: AllowDeclaredLead = "never"
     marks_to_win: int = DEFAULT_MARKS_TO_WIN
 
     def __post_init__(self) -> None:
@@ -44,6 +50,11 @@ class HouseRules:
             raise ValueError(f"marks_to_win must be positive, got {self.marks_to_win}")
         if STANDARD_CONTRACT not in self.enabled_contracts:
             raise ValueError(f"the {STANDARD_CONTRACT!r} contract cannot be disabled")
+        if self.allow_declared_lead not in _ALLOW_DECLARED_LEAD_VALUES:
+            raise ValueError(
+                f"allow_declared_lead must be one of {_ALLOW_DECLARED_LEAD_VALUES}, "
+                f"got {self.allow_declared_lead!r}"
+            )
         for name, options in self.contract_options.items():
             for key, value in options.items():
                 if not isinstance(value, int | bool | str):
