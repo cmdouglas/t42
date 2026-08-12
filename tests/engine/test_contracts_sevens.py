@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from t42.engine.config import RuleConfig
 from t42.engine.contracts import get
 from t42.engine.dominoes import Domino
+from t42.engine.house_rules import HouseRules
 from t42.engine.state import (
     Bid,
     GameState,
@@ -35,7 +35,7 @@ def _state_with_tricks(tricks: tuple[Trick, ...]) -> GameState:
     )
     return GameState(
         game_id="g",
-        config=RuleConfig(),
+        config=HouseRules(),
         players=dict(PLAYERS),
         phase=Phase.HAND_COMPLETE,
         marks={Team.NORTH_SOUTH: 0, Team.EAST_WEST: 0},
@@ -58,7 +58,7 @@ def test_closest_to_seven_wins_and_earliest_play_wins_ties() -> None:
             PlayedDomino(seat=Seat.WEST, domino=Domino(4, 0)),  # sum 4, distance 3
         )
     )
-    assert SEVENS.trick_winner(trick, None, RuleConfig()) is Seat.EAST
+    assert SEVENS.trick_winner(trick, None, HouseRules()) is Seat.EAST
 
 
 def test_sweeping_every_trick_makes_the_bid() -> None:

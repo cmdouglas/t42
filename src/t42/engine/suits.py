@@ -9,8 +9,8 @@ from __future__ import annotations
 from enum import IntEnum
 from typing import Final, Literal
 
-from .config import RuleConfig
 from .dominoes import Domino
+from .house_rules import HouseRules
 
 
 class Suit(IntEnum):
@@ -39,7 +39,7 @@ _DOUBLE_RANK: Final = 7
 type DoublesRank = Literal["high", "low"]
 
 
-def is_trump(domino: Domino, trump: Trump, config: RuleConfig) -> bool:
+def is_trump(domino: Domino, trump: Trump, config: HouseRules) -> bool:
     """Whether ``domino`` is a trump tile.
 
     Under ``doubles_are_own_suit`` a double belongs to the doubles suit only, so ``5-5`` is not
@@ -56,7 +56,7 @@ def is_trump(domino: Domino, trump: Trump, config: RuleConfig) -> bool:
     return trump in domino.ends
 
 
-def led_suit(domino: Domino, trump: Trump, config: RuleConfig) -> Suit:
+def led_suit(domino: Domino, trump: Trump, config: HouseRules) -> Suit:
     """The suit ``domino`` establishes when it is led.
 
     A non-trump tile belongs to both of its ends; led, it calls for its higher end.
@@ -69,7 +69,7 @@ def led_suit(domino: Domino, trump: Trump, config: RuleConfig) -> Suit:
     return Suit(domino.high)
 
 
-def belongs_to(domino: Domino, suit: Suit, config: RuleConfig) -> bool:
+def belongs_to(domino: Domino, suit: Suit, config: HouseRules) -> bool:
     """Whether ``domino`` is a member of ``suit``, ignoring trump."""
     if suit is Suit.DOUBLES:
         return config.doubles_are_own_suit and domino.is_double
@@ -78,7 +78,7 @@ def belongs_to(domino: Domino, suit: Suit, config: RuleConfig) -> bool:
     return suit in domino.ends
 
 
-def follows(domino: Domino, suit: Suit, trump: Trump, config: RuleConfig) -> bool:
+def follows(domino: Domino, suit: Suit, trump: Trump, config: HouseRules) -> bool:
     """Whether playing ``domino`` follows a lead of ``suit``.
 
     Trump tiles follow trump and nothing else, even though they carry a second end.
@@ -89,7 +89,7 @@ def follows(domino: Domino, suit: Suit, trump: Trump, config: RuleConfig) -> boo
 
 
 def rank_in_suit(
-    domino: Domino, suit: Suit, config: RuleConfig, *, doubles_rank: DoublesRank = "high"
+    domino: Domino, suit: Suit, config: HouseRules, *, doubles_rank: DoublesRank = "high"
 ) -> int:
     """Rank of ``domino`` within ``suit``; higher beats lower. Only meaningful within one suit.
 

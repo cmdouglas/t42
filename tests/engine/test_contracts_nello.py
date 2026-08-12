@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from t42.engine.config import RuleConfig
 from t42.engine.contracts import get
 from t42.engine.dominoes import Domino
+from t42.engine.house_rules import HouseRules
 from t42.engine.state import (
     Bid,
     GameState,
@@ -36,7 +36,7 @@ def _state_with_tricks(tricks: tuple[Trick, ...]) -> GameState:
     )
     return GameState(
         game_id="g",
-        config=RuleConfig(),
+        config=HouseRules(),
         players=dict(PLAYERS),
         phase=Phase.HAND_COMPLETE,
         marks={Team.NORTH_SOUTH: 0, Team.EAST_WEST: 0},
@@ -73,8 +73,8 @@ def test_taking_a_single_trick_sets_the_bid() -> None:
 def test_doubles_form_their_own_suit_regardless_of_the_table_config() -> None:
     # Even with the game's doubles_are_own_suit turned off, nello still treats a led double as
     # establishing the doubles suit, ranked 6-6 high to 0-0 low - intrinsic to the contract, not
-    # driven by RuleConfig.
-    off_config = RuleConfig(doubles_are_own_suit=False)
+    # driven by HouseRules.
+    off_config = HouseRules(doubles_are_own_suit=False)
     trick = Trick(
         plays=(
             PlayedDomino(seat=Seat.NORTH, domino=Domino(5, 5)),
@@ -93,4 +93,4 @@ def test_a_double_does_not_follow_a_non_double_led_suit() -> None:
             PlayedDomino(seat=Seat.EAST, domino=Domino(5, 5)),
         )
     )
-    assert NELLO.trick_winner(trick, None, RuleConfig()) is Seat.NORTH
+    assert NELLO.trick_winner(trick, None, HouseRules()) is Seat.NORTH

@@ -3,21 +3,22 @@
 Both: declarer's partner sits out (hand played 3-handed), no trump, declarer leads the first
 trick, declarer's side makes the bid only by losing every trick. The two contracts differ only in
 how a double ranks - each subclass fixes its own ``_doubles_are_own_suit``/``_doubles_rank``,
-independent of the game's ``RuleConfig.doubles_are_own_suit`` (DESIGN.md §12).
+independent of the game's ``HouseRules.doubles_are_own_suit`` (DESIGN.md §12).
 """
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import replace
 
-from ..config import RuleConfig
 from ..dominoes import Domino
-from ..errors import IllegalMove
+from ..errors import IllegalMove, RulesError
+from ..house_rules import HouseRules, OptionValue
 from ..state import Bid, GameState, Seat, Team, Trick, other_team, partner_of, team_of
 from ..suits import DoublesRank, Trump
 from ..trick_rules import follow_suit_plays, highest_trump_or_led_suit_wins
 
-_MINIMUM_MARKS = 1
+_OPTION_DEFAULTS: Mapping[str, OptionValue] = {"minimum_marks": 1}
 
 
 class NelloBase:
@@ -27,12 +28,22 @@ class NelloBase:
     _doubles_are_own_suit: bool
     _doubles_rank: DoublesRank
 
-    def _suit_config(self, config: RuleConfig) -> RuleConfig:
+    def _suit_config(self, config: HouseRules) -> HouseRules:
         return replace(config, doubles_are_own_suit=self._doubles_are_own_suit)
 
-    def validate_bid(self, bid: Bid, hand: tuple[Domino, ...], config: RuleConfig) -> None:
-        if bid.marks is None or bid.marks < _MINIMUM_MARKS:
-            raise IllegalMove(f"{self.name} must be bid at {_MINIMUM_MARKS}+ marks")
+    def option_defaults(self) -> Mapping[str, OptionValue]:
+        return _OPTION_DEFAULTS
+
+    def validate_options(self, options: Mapping[str, OptionValue], rules: HouseRules) -> None:
+        marks = options["minimum_marks"]
+        if not isinstance(marks, int) or not 1 <= marks <= 7:
+            raise RulesError(f"{self.name}.minimum_marks must be 1-7, got {marks!r}")
+
+    def validate_bid(self, bid: Bid, hand: tuple[Domino, ...], config: HouseRules) -> None:
+        minimum_marks = config.options_for(self.name, self.option_defaults())["minimum_marks"]
+        assert isinstance(minimum_marks, int)
+        if bid.marks is None or bid.marks < minimum_marks:
+            raise IllegalMove(f"{self.name} must be bid at {minimum_marks}+ marks")
 
     def requires_partner_confirmation(self) -> bool:
         return False
@@ -52,11 +63,11 @@ class NelloBase:
         return partner_of(state.hand.declarer)
 
     def legal_plays(
-        self, hand: tuple[Domino, ...], trick: Trick, trump: Trump, config: RuleConfig
+        self, hand: tuple[Domino, ...], trick: Trick, trump: Trump, config: HouseRules
     ) -> tuple[Domino, ...]:
         return follow_suit_plays(hand, trick, None, self._suit_config(config))
 
-    def trick_winner(self, trick: Trick, trump: Trump, config: RuleConfig) -> Seat:
+    def trick_winner(self, trick: Trick, trump: Trump, config: HouseRules) -> Seat:
         return highest_trump_or_led_suit_wins(
             trick, None, self._suit_config(config), doubles_rank=self._doubles_rank
         )

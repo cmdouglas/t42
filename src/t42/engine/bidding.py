@@ -15,9 +15,9 @@ from __future__ import annotations
 
 from dataclasses import replace
 
-from .config import STANDARD_CONTRACT
 from .contracts import get_enabled as get_enabled_contract
 from .errors import IllegalMove, OutOfTurn
+from .house_rules import STANDARD_CONTRACT
 from .moves import ConfirmBid, Pass, PlaceBid
 from .scoring import MAX_HAND_POINTS, MINIMUM_BID
 from .state import Bid, GameState, PendingBid, Phase, Seat, partner_of, seat_of

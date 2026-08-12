@@ -11,11 +11,11 @@ from __future__ import annotations
 
 from dataclasses import replace
 
-from .config import RuleConfig
 from .contracts import Contract
 from .contracts import get as get_contract
 from .dominoes import Domino
 from .errors import IllegalMove, OutOfTurn
+from .house_rules import HouseRules
 from .moves import PlayDomino
 from .scoring import TRICKS_PER_HAND
 from .state import GameState, Phase, PlayedDomino, Seat, Trick, seat_of
@@ -23,7 +23,7 @@ from .suits import Trump
 
 
 def legal_plays(
-    hand: tuple[Domino, ...], trick: Trick, trump: Trump, config: RuleConfig, contract: Contract
+    hand: tuple[Domino, ...], trick: Trick, trump: Trump, config: HouseRules, contract: Contract
 ) -> tuple[Domino, ...]:
     """The tiles in ``hand`` that may legally be played to ``trick`` under ``contract``.
 
@@ -33,7 +33,7 @@ def legal_plays(
     return contract.legal_plays(hand, trick, trump, config)
 
 
-def trick_winner(trick: Trick, trump: Trump, config: RuleConfig, contract: Contract) -> Seat:
+def trick_winner(trick: Trick, trump: Trump, config: HouseRules, contract: Contract) -> Seat:
     """The seat that wins a completed trick under ``contract``."""
     return contract.trick_winner(trick, trump, config)
 

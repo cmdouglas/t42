@@ -2,10 +2,10 @@ from __future__ import annotations
 
 import pytest
 
-from t42.engine.config import RuleConfig
 from t42.engine.contracts import get
 from t42.engine.dominoes import Domino
 from t42.engine.errors import IllegalMove
+from t42.engine.house_rules import HouseRules
 from t42.engine.state import Bid, GameState, HandState, Phase, PlayedDomino, Seat, Team, Trick
 from t42.engine.suits import Suit
 
@@ -30,7 +30,7 @@ def _state_with_tricks(bid_points: int, tricks: tuple[Trick, ...]) -> GameState:
     )
     return GameState(
         game_id="g",
-        config=RuleConfig(),
+        config=HouseRules(),
         players=dict(PLAYERS),
         phase=Phase.HAND_COMPLETE,
         marks={Team.NORTH_SOUTH: 0, Team.EAST_WEST: 0},
@@ -41,7 +41,7 @@ def _state_with_tricks(bid_points: int, tricks: tuple[Trick, ...]) -> GameState:
 def test_validate_bid_rejects_a_marks_form_bid() -> None:
     with pytest.raises(IllegalMove):
         STANDARD.validate_bid(
-            Bid(bidder=Seat.NORTH, contract="standard", marks=1), (), RuleConfig()
+            Bid(bidder=Seat.NORTH, contract="standard", marks=1), (), HouseRules()
         )
 
 

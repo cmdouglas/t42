@@ -7,10 +7,10 @@ raises. That is what keeps the rules testable in isolation and reusable behind a
 
 from __future__ import annotations
 
-from .config import DEFAULT_CONTRACTS, DEFAULT_MARKS_TO_WIN, RuleConfig
 from .dominoes import FULL_SET, Domino, parse
 from .errors import IllegalMove, OutOfTurn, RulesError, UnknownContract
 from .game import apply_move, legal_moves, new_game
+from .house_rules import DEFAULT_CONTRACTS, DEFAULT_MARKS_TO_WIN, HouseRules
 from .projection import project
 from .scoring import COUNT_VALUES, HAND_COUNT_TOTAL, MAX_HAND_POINTS, count_value
 from .state import GameState, HandState, Phase, Seat, Team, Trick
@@ -26,10 +26,10 @@ __all__ = [
     "Domino",
     "GameState",
     "HandState",
+    "HouseRules",
     "IllegalMove",
     "OutOfTurn",
     "Phase",
-    "RuleConfig",
     "RulesError",
     "Seat",
     "Suit",

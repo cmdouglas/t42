@@ -6,8 +6,8 @@ New contracts plug in by registering themselves; nothing in the engine switches 
 
 from __future__ import annotations
 
-from ..config import RuleConfig
 from ..errors import UnknownContract
+from ..house_rules import HouseRules
 from .base import Contract
 
 _REGISTRY: dict[str, Contract] = {}
@@ -29,7 +29,7 @@ def get(name: str) -> Contract:
         raise UnknownContract(f"unknown contract: {name!r}") from None
 
 
-def get_enabled(name: str, config: RuleConfig) -> Contract:
+def get_enabled(name: str, config: HouseRules) -> Contract:
     """Look up a contract, rejecting one this game has not enabled."""
     contract = get(name)
     if not config.allows(name):
@@ -42,7 +42,27 @@ def available() -> tuple[str, ...]:
     return tuple(sorted(_REGISTRY))
 
 
-def validate_enabled(config: RuleConfig) -> None:
-    """Check every contract named in ``config`` exists. Call this at game creation."""
-    for name in sorted(config.enabled_contracts):
+def validate_house_rules(rules: HouseRules) -> None:
+    """Registry-aware validation of a house-rule set (DESIGN.md §5.1). Call this at game
+    creation so an invalid rule set can never produce a game.
+
+    Structural checks that need no registry (``marks_to_win``, ``standard`` enabled, option
+    value types) already ran in ``HouseRules.__post_init__``. This covers everything that needs
+    the registry: every enabled contract is registered, every contract given options is actually
+    enabled, and each contract's own ``validate_options`` passes (the "satisfiable" and
+    "coherent" tiers, e.g. the plunge/splash entry-bar ordering).
+    """
+    for name in sorted(rules.enabled_contracts):
         get(name)
+
+    for name in sorted(rules.contract_options):
+        if name not in rules.enabled_contracts:
+            raise UnknownContract(
+                f"house rules set options for {name!r}, which is not enabled for this game"
+            )
+        get(name)
+
+    for name in sorted(rules.enabled_contracts):
+        contract = get(name)
+        options = rules.options_for(name, contract.option_defaults())
+        contract.validate_options(options, rules)

@@ -3,14 +3,14 @@ from __future__ import annotations
 from hypothesis import given
 from hypothesis import strategies as st
 
-from t42.engine.config import RuleConfig
 from t42.engine.dominoes import FULL_SET, Domino
+from t42.engine.house_rules import HouseRules
 from t42.engine.state import PlayedDomino, Seat, Trick
 from t42.engine.suits import NUMBER_SUITS, Suit
 from t42.engine.trick_rules import follow_suit_plays, highest_trump_or_led_suit_wins
 
-PLAIN = RuleConfig()
-DOUBLES_SUIT = RuleConfig(doubles_are_own_suit=True)
+PLAIN = HouseRules()
+DOUBLES_SUIT = HouseRules(doubles_are_own_suit=True)
 
 
 def _trick(*plays: tuple[Seat, Domino]) -> Trick:
@@ -94,7 +94,7 @@ class TestHighestTrumpOrLedSuitWins:
     def test_exactly_one_seat_wins_every_well_formed_trick(
         self, tiles: list[Domino], trump: Suit | None, doubles_are_own_suit: bool
     ) -> None:
-        config = RuleConfig(doubles_are_own_suit=doubles_are_own_suit)
+        config = HouseRules(doubles_are_own_suit=doubles_are_own_suit)
         trick = _trick(*zip(Seat, tiles, strict=True))
         winner = highest_trump_or_led_suit_wins(trick, trump, config)
         assert winner in list(Seat)

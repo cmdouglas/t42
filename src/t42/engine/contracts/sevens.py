@@ -6,23 +6,35 @@ partner sit-out.
 
 from __future__ import annotations
 
-from ..config import RuleConfig
+from collections.abc import Mapping
+
 from ..dominoes import Domino
-from ..errors import IllegalMove
+from ..errors import IllegalMove, RulesError
+from ..house_rules import HouseRules, OptionValue
 from ..state import Bid, GameState, Seat, Team, Trick, other_team, team_of
 from ..suits import Trump
 from ..trick_rules import follow_suit_plays
 from .registry import register
 
-_MINIMUM_MARKS = 1
+_OPTION_DEFAULTS: Mapping[str, OptionValue] = {"minimum_marks": 1}
 
 
 class SevensContract:
     name = "sevens"
 
-    def validate_bid(self, bid: Bid, hand: tuple[Domino, ...], config: RuleConfig) -> None:
-        if bid.marks is None or bid.marks < _MINIMUM_MARKS:
-            raise IllegalMove(f"sevens must be bid at {_MINIMUM_MARKS}+ marks")
+    def option_defaults(self) -> Mapping[str, OptionValue]:
+        return _OPTION_DEFAULTS
+
+    def validate_options(self, options: Mapping[str, OptionValue], rules: HouseRules) -> None:
+        marks = options["minimum_marks"]
+        if not isinstance(marks, int) or not 1 <= marks <= 7:
+            raise RulesError(f"sevens.minimum_marks must be 1-7, got {marks!r}")
+
+    def validate_bid(self, bid: Bid, hand: tuple[Domino, ...], config: HouseRules) -> None:
+        minimum_marks = config.options_for("sevens", self.option_defaults())["minimum_marks"]
+        assert isinstance(minimum_marks, int)
+        if bid.marks is None or bid.marks < minimum_marks:
+            raise IllegalMove(f"sevens must be bid at {minimum_marks}+ marks")
 
     def requires_partner_confirmation(self) -> bool:
         return False
@@ -41,11 +53,11 @@ class SevensContract:
         return None
 
     def legal_plays(
-        self, hand: tuple[Domino, ...], trick: Trick, trump: Trump, config: RuleConfig
+        self, hand: tuple[Domino, ...], trick: Trick, trump: Trump, config: HouseRules
     ) -> tuple[Domino, ...]:
         return follow_suit_plays(hand, trick, None, config)
 
-    def trick_winner(self, trick: Trick, trump: Trump, config: RuleConfig) -> Seat:
+    def trick_winner(self, trick: Trick, trump: Trump, config: HouseRules) -> Seat:
         """Closest to seven pips wins; a later play must strictly beat the standing winner."""
         assert trick.plays, "trick_winner called on an empty trick"
         best = trick.plays[0]

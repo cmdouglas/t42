@@ -2,10 +2,10 @@ from __future__ import annotations
 
 import pytest
 
-from t42.engine.config import RuleConfig
 from t42.engine.contracts import get
 from t42.engine.dominoes import Domino
 from t42.engine.errors import IllegalMove
+from t42.engine.house_rules import HouseRules
 from t42.engine.state import (
     Bid,
     GameState,
@@ -40,7 +40,7 @@ def _state_with_tricks(tricks: tuple[Trick, ...]) -> GameState:
     )
     return GameState(
         game_id="g",
-        config=RuleConfig(),
+        config=HouseRules(),
         players=dict(PLAYERS),
         phase=Phase.HAND_COMPLETE,
         marks={Team.NORTH_SOUTH: 0, Team.EAST_WEST: 0},
@@ -51,7 +51,7 @@ def _state_with_tricks(tricks: tuple[Trick, ...]) -> GameState:
 def test_requires_four_marks() -> None:
     with pytest.raises(IllegalMove, match="marks"):
         PLUNGE.validate_bid(
-            Bid(bidder=Seat.NORTH, contract="plunge", marks=3), DOUBLES, RuleConfig()
+            Bid(bidder=Seat.NORTH, contract="plunge", marks=3), DOUBLES, HouseRules()
         )
 
 
@@ -59,12 +59,19 @@ def test_requires_at_least_four_doubles() -> None:
     weak_hand = (*DOUBLES[:3], Domino(6, 5), Domino(6, 4), Domino(5, 4), Domino(4, 3))
     with pytest.raises(IllegalMove, match="doubles"):
         PLUNGE.validate_bid(
-            Bid(bidder=Seat.NORTH, contract="plunge", marks=4), weak_hand, RuleConfig()
+            Bid(bidder=Seat.NORTH, contract="plunge", marks=4), weak_hand, HouseRules()
         )
 
 
 def test_four_doubles_and_four_marks_is_legal() -> None:
-    PLUNGE.validate_bid(Bid(bidder=Seat.NORTH, contract="plunge", marks=4), DOUBLES, RuleConfig())
+    PLUNGE.validate_bid(Bid(bidder=Seat.NORTH, contract="plunge", marks=4), DOUBLES, HouseRules())
+
+
+def test_a_house_rule_override_raises_the_marks_minimum() -> None:
+    strict = HouseRules(contract_options={"plunge": {"minimum_marks": 6}})
+    with pytest.raises(IllegalMove, match="marks"):
+        PLUNGE.validate_bid(Bid(bidder=Seat.NORTH, contract="plunge", marks=5), DOUBLES, strict)
+    PLUNGE.validate_bid(Bid(bidder=Seat.NORTH, contract="plunge", marks=6), DOUBLES, strict)
 
 
 def test_requires_partner_confirmation() -> None:

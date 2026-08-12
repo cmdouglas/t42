@@ -3,9 +3,9 @@ from __future__ import annotations
 import pytest
 
 from t42.engine.bidding import apply_bid, apply_confirmation, legal_bids
-from t42.engine.config import RuleConfig
 from t42.engine.dominoes import Domino
 from t42.engine.errors import IllegalMove, OutOfTurn
+from t42.engine.house_rules import HouseRules
 from t42.engine.moves import ConfirmBid, Pass, PlaceBid
 from t42.engine.state import Bid, Phase, Seat
 
@@ -73,7 +73,7 @@ def test_splash_with_enough_doubles_is_legal() -> None:
     hands = custom_deal(
         north=(*DOUBLES[:3], Domino(6, 5), Domino(6, 4), Domino(5, 4), Domino(4, 3))
     )
-    config = RuleConfig(enabled_contracts=frozenset({"standard", "nello", "plunge", "splash"}))
+    config = HouseRules(enabled_contracts=frozenset({"standard", "nello", "plunge", "splash"}))
     state = make_game(hands, to_act=Seat.NORTH, config=config)
     assert Bid(bidder=Seat.NORTH, contract="splash", marks=2) in legal_bids(state)
     assert Bid(bidder=Seat.NORTH, contract="splash", marks=1) not in legal_bids(state)

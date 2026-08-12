@@ -9,14 +9,14 @@ functions; a contract only needs its own logic where it genuinely differs (seven
 
 from __future__ import annotations
 
-from .config import RuleConfig
 from .dominoes import Domino
+from .house_rules import HouseRules
 from .state import Seat, Trick
 from .suits import DoublesRank, Trump, belongs_to, follows, is_trump, led_suit, rank_in_suit
 
 
 def follow_suit_plays(
-    hand: tuple[Domino, ...], trick: Trick, trump: Trump, config: RuleConfig
+    hand: tuple[Domino, ...], trick: Trick, trump: Trump, config: HouseRules
 ) -> tuple[Domino, ...]:
     """The standard follow-suit rule: lead anything; otherwise the led suit if you hold it."""
     if not trick.plays:
@@ -27,7 +27,7 @@ def follow_suit_plays(
 
 
 def highest_trump_or_led_suit_wins(
-    trick: Trick, trump: Trump, config: RuleConfig, *, doubles_rank: DoublesRank = "high"
+    trick: Trick, trump: Trump, config: HouseRules, *, doubles_rank: DoublesRank = "high"
 ) -> Seat:
     """The standard trick-winner rule: highest trump if any was played, else highest tile of the
     led suit. With ``trump=None`` this degenerates to "highest of the led suit", which is exactly

@@ -6,10 +6,11 @@ protocol, so the trick engine and bidding machine never branch on contract name.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Protocol, runtime_checkable
 
-from ..config import RuleConfig
 from ..dominoes import Domino
+from ..house_rules import HouseRules, OptionValue
 from ..state import Bid, GameState, Seat, Team, Trick
 from ..suits import Trump
 
@@ -21,9 +22,20 @@ class Contract(Protocol):
     #: Registry key, and the value stored in events and state.
     name: str
 
-    def validate_bid(self, bid: Bid, hand: tuple[Domino, ...], config: RuleConfig) -> None:
+    def validate_bid(self, bid: Bid, hand: tuple[Domino, ...], config: HouseRules) -> None:
         """Reject bids this contract cannot be bid at, given the bidder's hand. Raises
         ``IllegalMove`` (doubles-in-hand requirements for plunge and splash live here)."""
+        ...
+
+    def option_defaults(self) -> Mapping[str, OptionValue]:
+        """The option keys this contract accepts, with the values used when the house does not
+        override them (DESIGN.md §5.1). Empty for a contract that takes no options."""
+        ...
+
+    def validate_options(self, options: Mapping[str, OptionValue], rules: HouseRules) -> None:
+        """This contract's own checks on ``options`` (already merged over ``option_defaults()``)
+        against the rest of ``rules``. Raises ``RulesError`` for a range or coherence violation
+        (DESIGN.md §5.1's "satisfiable" and "coherent" tiers)."""
         ...
 
     def requires_partner_confirmation(self) -> bool:
@@ -49,12 +61,12 @@ class Contract(Protocol):
         ...
 
     def legal_plays(
-        self, hand: tuple[Domino, ...], trick: Trick, trump: Trump, config: RuleConfig
+        self, hand: tuple[Domino, ...], trick: Trick, trump: Trump, config: HouseRules
     ) -> tuple[Domino, ...]:
         """Legal plays under this contract, tightening or replacing the default follow-suit rule."""
         ...
 
-    def trick_winner(self, trick: Trick, trump: Trump, config: RuleConfig) -> Seat:
+    def trick_winner(self, trick: Trick, trump: Trump, config: HouseRules) -> Seat:
         """Winner of a completed trick under this contract (sevens ranks by pip distance from 7)."""
         ...
 

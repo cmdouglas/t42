@@ -11,9 +11,9 @@ from random import Random
 
 import pytest
 
-from t42.engine.config import RuleConfig
 from t42.engine.dominoes import Domino
 from t42.engine.game import apply_move, legal_moves, new_game
+from t42.engine.house_rules import HouseRules
 from t42.engine.moves import ConfirmBid, Move, Pass, PlaceBid
 from t42.engine.state import GameState, HandState, Phase, Seat, Team
 
@@ -76,11 +76,11 @@ def _run_single_hand_game(
     *,
     dealer: Seat,
     contract_name: str,
-    config: RuleConfig | None = None,
+    config: HouseRules | None = None,
 ) -> GameState:
     state = GameState(
         game_id="full-game",
-        config=config or RuleConfig(marks_to_win=1),
+        config=config or HouseRules(marks_to_win=1),
         players=dict(PLAYERS),
         phase=Phase.BIDDING,
         marks={Team.NORTH_SOUTH: 0, Team.EAST_WEST: 0},
@@ -95,7 +95,7 @@ def _run_single_hand_game(
 
 def test_full_game_standard() -> None:
     rng = Random(1)
-    state = new_game("g-standard", PLAYERS, RuleConfig(marks_to_win=1), rng=rng)
+    state = new_game("g-standard", PLAYERS, HouseRules(marks_to_win=1), rng=rng)
     final = _drive_to_game_over(state, _first_option, rng)
     assert final.phase is Phase.GAME_OVER
     assert final.hand is None
@@ -105,7 +105,7 @@ def test_full_game_standard() -> None:
 @pytest.mark.parametrize("contract_name", ["nello", "nello_low", "sevens"])
 def test_full_game_no_doubles_requirement_contracts(contract_name: str) -> None:
     rng = Random(2)
-    config = RuleConfig(
+    config = HouseRules(
         enabled_contracts=frozenset({"standard", "nello", "nello_low", "sevens"}),
         marks_to_win=1,
     )
@@ -122,9 +122,19 @@ def test_full_game_plunge() -> None:
     assert sum(final.marks.values()) >= 4
 
 
+def test_full_game_plunge_under_a_stricter_house_rule() -> None:
+    hands = _plunge_or_splash_deal(Seat.NORTH, extra_doubles=1)  # 5 doubles, meets a raised bar
+    config = HouseRules(
+        marks_to_win=1,
+        contract_options={"plunge": {"minimum_doubles": 5, "minimum_marks": 5}},
+    )
+    final = _run_single_hand_game(hands, dealer=Seat.WEST, contract_name="plunge", config=config)
+    assert sum(final.marks.values()) >= 5  # the raised minimum_marks, not the contract's default 4
+
+
 def test_full_game_splash() -> None:
     hands = _plunge_or_splash_deal(Seat.NORTH, extra_doubles=1)  # 5 doubles, well above the 3 min
-    config = RuleConfig(
+    config = HouseRules(
         enabled_contracts=frozenset({"standard", "nello", "plunge", "sevens", "splash"}),
         marks_to_win=1,
     )
@@ -134,7 +144,7 @@ def test_full_game_splash() -> None:
 
 def test_full_random_game_reaches_game_over_across_several_hands() -> None:
     rng = Random(99)
-    state = new_game("g-random", PLAYERS, RuleConfig(), rng=rng)  # default marks_to_win=7
+    state = new_game("g-random", PLAYERS, HouseRules(), rng=rng)  # default marks_to_win=7
 
     def choose(state: GameState, options: tuple[Move, ...]) -> Move:
         return rng.choice(options)
@@ -148,7 +158,7 @@ def test_full_random_game_reaches_game_over_across_several_hands() -> None:
 def test_full_random_games_never_crash_across_many_seeds() -> None:
     for seed in range(25):
         rng = Random(seed)
-        state = new_game(f"g-{seed}", PLAYERS, RuleConfig(marks_to_win=2), rng=rng)
+        state = new_game(f"g-{seed}", PLAYERS, HouseRules(marks_to_win=2), rng=rng)
 
         def choose(state: GameState, options: tuple[Move, ...], rng: Random = rng) -> Move:
             return rng.choice(options)

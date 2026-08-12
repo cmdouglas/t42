@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import pytest
 
-from t42.engine.config import RuleConfig
 from t42.engine.dominoes import FULL_SET, Domino
+from t42.engine.house_rules import HouseRules
 from t42.engine.suits import (
     NUMBER_SUITS,
     Suit,
@@ -14,8 +14,8 @@ from t42.engine.suits import (
     rank_in_suit,
 )
 
-PLAIN = RuleConfig()
-DOUBLES_SUIT = RuleConfig(doubles_are_own_suit=True)
+PLAIN = HouseRules()
+DOUBLES_SUIT = HouseRules(doubles_are_own_suit=True)
 
 
 class TestIsTrump:

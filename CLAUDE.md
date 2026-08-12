@@ -25,10 +25,13 @@ public `new_game`/`apply_move`/`legal_moves` entry points. See ROADMAP.md for th
 checklist. `projection.py` is still a Phase 1 stub - nothing under `storage/`, `api/` or `cli/`
 exists yet.
 
-Phase 0.5 (house rules) is the next phase, ahead of Phase 1: the config type is still named
-`RuleConfig` in `config.py`, and each contract's bid minimums are still class attributes rather
-than per-game options. DESIGN.md §5.1 defines the target model; ROADMAP.md Phase 0.5 breaks down
-the work. Until it lands, invariant 3 below describes the intent, not the code.
+Phase 0.5 (house rules) is next, ahead of Phase 1. Steps 0.5.1-0.5.4 are complete: the rule-config
+type is `HouseRules` in `house_rules.py`, each contract declares its own options through
+`option_defaults()`/`validate_options()` (the plunge/splash doubles-and-marks minimums and the
+nello/nello_low/sevens mark floor all live in `contract_options` now, not as class attributes),
+and `new_game` rejects an invalid house-rule set via `contracts.validate_house_rules` before a game
+is ever created. Only 0.5.5 (declared leads) remains before the phase closes out; DESIGN.md §5.2
+and ROADMAP.md's "0.5.5" define it.
 
 ## Layout
 
@@ -37,7 +40,7 @@ src/t42/engine/     pure rules library (Phase 0 - complete)
     dominoes.py     the 28 tiles, a-b notation
     suits.py        trump membership, led suit, follow, ranking, doubles-own-suit variant
     scoring.py      count-domino values, hand point totals
-    config.py       per-game RuleConfig (rule variants); becomes house_rules.py in Phase 0.5
+    house_rules.py  per-game HouseRules (rule variants), incl. contract_options
     trick_rules.py  shared follow-suit legality and highest-trump-or-led-suit winner
     contracts/      Contract protocol, name-keyed registry, all six contract strategies
     state.py        frozen dataclasses: GameState, HandState, Trick, PendingBid

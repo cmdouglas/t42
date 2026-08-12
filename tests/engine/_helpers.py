@@ -5,8 +5,8 @@ from __future__ import annotations
 
 from random import Random
 
-from t42.engine.config import RuleConfig
 from t42.engine.dominoes import FULL_SET, Domino
+from t42.engine.house_rules import HouseRules
 from t42.engine.state import GameState, HandState, Phase, PlayerId, Seat, Team
 
 PLAYERS: dict[Seat, PlayerId] = {
@@ -28,7 +28,7 @@ def make_game(
     hands: dict[Seat, tuple[Domino, ...]],
     *,
     dealer: Seat = Seat.NORTH,
-    config: RuleConfig | None = None,
+    config: HouseRules | None = None,
     to_act: Seat | None = None,
     marks: dict[Team, int] | None = None,
 ) -> GameState:
@@ -36,7 +36,7 @@ def make_game(
     hand = HandState(dealer=dealer, hands=hands)
     return GameState(
         game_id="test-game",
-        config=config or RuleConfig(),
+        config=config or HouseRules(),
         players=dict(PLAYERS),
         phase=Phase.BIDDING,
         marks=marks or {Team.NORTH_SOUTH: 0, Team.EAST_WEST: 0},

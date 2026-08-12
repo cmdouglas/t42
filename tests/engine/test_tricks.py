@@ -2,10 +2,10 @@ from __future__ import annotations
 
 import pytest
 
-from t42.engine.config import RuleConfig
 from t42.engine.contracts import get as get_contract
 from t42.engine.dominoes import FULL_SET
 from t42.engine.errors import IllegalMove, OutOfTurn
+from t42.engine.house_rules import HouseRules
 from t42.engine.moves import PlayDomino
 from t42.engine.state import Bid, GameState, HandState, Phase, Seat, Team, partner_of
 from t42.engine.suits import Suit
@@ -26,7 +26,7 @@ def _standard_playing_state(seed: int, *, declarer: Seat = Seat.NORTH) -> GameSt
     )
     return GameState(
         game_id="test-game",
-        config=RuleConfig(),
+        config=HouseRules(),
         players=dict(PLAYERS),
         phase=Phase.PLAYING,
         marks={Team.NORTH_SOUTH: 0, Team.EAST_WEST: 0},
@@ -47,7 +47,7 @@ def _nello_playing_state(seed: int, *, declarer: Seat = Seat.NORTH) -> GameState
     )
     return GameState(
         game_id="test-game",
-        config=RuleConfig(),
+        config=HouseRules(),
         players=dict(PLAYERS),
         phase=Phase.PLAYING,
         marks={Team.NORTH_SOUTH: 0, Team.EAST_WEST: 0},

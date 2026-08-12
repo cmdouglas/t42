@@ -6,9 +6,11 @@ mark-form bid for "standard" is always rejected.
 
 from __future__ import annotations
 
-from ..config import RuleConfig
+from collections.abc import Mapping
+
 from ..dominoes import Domino
 from ..errors import IllegalMove
+from ..house_rules import HouseRules, OptionValue
 from ..scoring import POINT_PER_TRICK, count_of
 from ..state import Bid, GameState, Seat, Team, Trick, other_team, team_of
 from ..suits import Trump
@@ -19,8 +21,14 @@ from .registry import register
 class StandardContract:
     name = "standard"
 
-    def validate_bid(self, bid: Bid, hand: tuple[Domino, ...], config: RuleConfig) -> None:
+    def validate_bid(self, bid: Bid, hand: tuple[Domino, ...], config: HouseRules) -> None:
         raise IllegalMove("standard is a points bid (30-42), not a mark bid")
+
+    def option_defaults(self) -> Mapping[str, OptionValue]:
+        return {}
+
+    def validate_options(self, options: Mapping[str, OptionValue], rules: HouseRules) -> None:
+        return None
 
     def requires_partner_confirmation(self) -> bool:
         return False
@@ -40,11 +48,11 @@ class StandardContract:
         return None
 
     def legal_plays(
-        self, hand: tuple[Domino, ...], trick: Trick, trump: Trump, config: RuleConfig
+        self, hand: tuple[Domino, ...], trick: Trick, trump: Trump, config: HouseRules
     ) -> tuple[Domino, ...]:
         return follow_suit_plays(hand, trick, trump, config)
 
-    def trick_winner(self, trick: Trick, trump: Trump, config: RuleConfig) -> Seat:
+    def trick_winner(self, trick: Trick, trump: Trump, config: HouseRules) -> Seat:
         return highest_trump_or_led_suit_wins(trick, trump, config)
 
     def score_hand(self, state: GameState) -> dict[Team, int]:

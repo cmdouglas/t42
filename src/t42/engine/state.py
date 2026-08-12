@@ -11,8 +11,8 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import IntEnum, StrEnum
 
-from .config import RuleConfig
 from .dominoes import Domino
+from .house_rules import HouseRules
 from .suits import Trump
 
 type PlayerId = str
@@ -125,7 +125,7 @@ class GameState:
     :func:`t42.engine.projection.project`."""
 
     game_id: GameId
-    config: RuleConfig
+    config: HouseRules
     players: Mapping[Seat, PlayerId]
     phase: Phase = Phase.BIDDING
     marks: Mapping[Team, int] = field(default_factory=dict)

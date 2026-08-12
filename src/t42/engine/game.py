@@ -11,10 +11,11 @@ from dataclasses import replace
 from random import Random
 
 from . import bidding, tricks
-from .config import RuleConfig
 from .contracts import get as get_contract
+from .contracts import validate_house_rules
 from .dominoes import FULL_SET
 from .errors import IllegalMove, OutOfTurn
+from .house_rules import HouseRules
 from .moves import ConfirmBid, DeclareContract, Move, Pass, PlaceBid, PlayDomino
 from .state import (
     GameId,
@@ -32,7 +33,7 @@ from .suits import NUMBER_SUITS, Suit, Trump
 def new_game(
     game_id: GameId,
     players: Mapping[Seat, PlayerId],
-    config: RuleConfig,
+    config: HouseRules,
     *,
     rng: Random,
 ) -> GameState:
@@ -40,7 +41,11 @@ def new_game(
 
     ``rng`` is injected rather than taken from module state so deals are reproducible in tests and
     the engine stays free of ambient randomness. Dealer for the first hand is always North.
+
+    Raises if ``config`` is not a valid house-rule set (DESIGN.md §5.1) - checked before the seat
+    validation below, so an invalid rule set is rejected regardless of ``players``.
     """
+    validate_house_rules(config)
     if set(players) != set(Seat):
         raise ValueError(f"a game needs all four seats filled, got {sorted(players)}")
     dealer = Seat.NORTH
@@ -156,14 +161,14 @@ def _apply_play_move(state: GameState, move: Move) -> GameState:
     return tricks.play(state, move)
 
 
-def _validate_trump(trump: Trump, config: RuleConfig) -> None:
+def _validate_trump(trump: Trump, config: HouseRules) -> None:
     if trump is None:
         raise IllegalMove("a trump suit must be declared")
     if trump is Suit.DOUBLES and not config.doubles_are_own_suit:
         raise IllegalMove("doubles cannot be trump unless doubles_are_own_suit is enabled")
 
 
-def _legal_trumps(config: RuleConfig) -> tuple[Suit, ...]:
+def _legal_trumps(config: HouseRules) -> tuple[Suit, ...]:
     if config.doubles_are_own_suit:
         return (*NUMBER_SUITS, Suit.DOUBLES)
     return NUMBER_SUITS
@@ -193,7 +198,7 @@ def _complete_hand(state: GameState, rng: Random) -> GameState:
     )
 
 
-def _deal_hand(config: RuleConfig, dealer: Seat, rng: Random) -> HandState:
+def _deal_hand(config: HouseRules, dealer: Seat, rng: Random) -> HandState:
     tiles = list(FULL_SET)
     rng.shuffle(tiles)
     hands = {seat: tuple(tiles[i * 7 : (i + 1) * 7]) for i, seat in enumerate(Seat)}
