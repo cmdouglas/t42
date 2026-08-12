@@ -6,61 +6,19 @@ future API handler would call them.
 
 from __future__ import annotations
 
-from collections.abc import Callable
 from random import Random
 
 import pytest
 
 from t42.engine.dominoes import Domino
-from t42.engine.game import apply_move, legal_moves, new_game
+from t42.engine.game import new_game
 from t42.engine.house_rules import HouseRules
-from t42.engine.moves import ConfirmBid, Move, Pass, PlaceBid
+from t42.engine.moves import Move
 from t42.engine.state import GameState, HandState, Phase, Seat, Team
 
-from ._helpers import PLAYERS, custom_deal, player_of
+from ._helpers import PLAYERS, custom_deal, drive_to_game_over, first_option, prefer_contract
 
 DOUBLES = tuple(Domino(n, n) for n in range(7))
-
-
-def _first_option(state: GameState, options: tuple[Move, ...]) -> Move:
-    return options[0]
-
-
-Chooser = Callable[[GameState, tuple[Move, ...]], Move]
-
-
-def _prefer_contract(contract_name: str) -> Chooser:
-    def choose(state: GameState, options: tuple[Move, ...]) -> Move:
-        if state.phase is Phase.BIDDING:
-            for_target = [
-                o for o in options if isinstance(o, PlaceBid) and o.contract == contract_name
-            ]
-            if for_target:
-                return min(for_target, key=lambda o: o.marks or 0)
-            confirms = [o for o in options if isinstance(o, ConfirmBid)]
-            if confirms:
-                return next(o for o in confirms if o.accept)
-            passes = [o for o in options if isinstance(o, Pass)]
-            if passes:
-                return passes[0]
-        return options[0]
-
-    return choose
-
-
-def _drive_to_game_over(
-    state: GameState, choose: Chooser, rng: Random, *, max_moves: int = 500
-) -> GameState:
-    for _ in range(max_moves):
-        if state.phase is Phase.GAME_OVER:
-            return state
-        seat = state.to_act
-        assert seat is not None
-        options = legal_moves(state, player_of(seat))
-        assert options, f"{player_of(seat)} has no legal moves in {state.phase}"
-        move = choose(state, options)
-        state = apply_move(state, move, rng=rng)
-    raise AssertionError(f"game did not reach GAME_OVER within {max_moves} moves")
 
 
 def _plunge_or_splash_deal(
@@ -87,7 +45,7 @@ def _run_single_hand_game(
         hand=HandState(dealer=dealer, hands=hands),
         to_act=Seat((dealer + 1) % 4),
     )
-    final = _drive_to_game_over(state, _prefer_contract(contract_name), Random(0))
+    final = drive_to_game_over(state, prefer_contract(contract_name), Random(0))
     assert final.hand is None
     assert final.phase is Phase.GAME_OVER
     return final
@@ -96,7 +54,7 @@ def _run_single_hand_game(
 def test_full_game_standard() -> None:
     rng = Random(1)
     state = new_game("g-standard", PLAYERS, HouseRules(marks_to_win=1), rng=rng)
-    final = _drive_to_game_over(state, _first_option, rng)
+    final = drive_to_game_over(state, first_option, rng)
     assert final.phase is Phase.GAME_OVER
     assert final.hand is None
     assert sum(final.marks.values()) >= 1
@@ -110,7 +68,7 @@ def test_full_game_no_doubles_requirement_contracts(contract_name: str) -> None:
         marks_to_win=1,
     )
     state = new_game(f"g-{contract_name}", PLAYERS, config, rng=rng)
-    final = _drive_to_game_over(state, _prefer_contract(contract_name), rng)
+    final = drive_to_game_over(state, prefer_contract(contract_name), rng)
     assert final.phase is Phase.GAME_OVER
     assert final.hand is None
     assert sum(final.marks.values()) >= 1
@@ -149,7 +107,7 @@ def test_full_random_game_reaches_game_over_across_several_hands() -> None:
     def choose(state: GameState, options: tuple[Move, ...]) -> Move:
         return rng.choice(options)
 
-    final = _drive_to_game_over(state, choose, rng, max_moves=5000)
+    final = drive_to_game_over(state, choose, rng, max_moves=5000)
     assert final.phase is Phase.GAME_OVER
     assert final.hand is None
     assert any(m >= final.config.marks_to_win for m in final.marks.values())
@@ -163,5 +121,5 @@ def test_full_random_games_never_crash_across_many_seeds() -> None:
         def choose(state: GameState, options: tuple[Move, ...], rng: Random = rng) -> Move:
             return rng.choice(options)
 
-        final = _drive_to_game_over(state, choose, rng, max_moves=2000)
+        final = drive_to_game_over(state, choose, rng, max_moves=2000)
         assert final.phase is Phase.GAME_OVER

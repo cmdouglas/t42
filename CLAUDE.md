@@ -25,14 +25,23 @@ public `new_game`/`apply_move`/`legal_moves` entry points. See ROADMAP.md for th
 checklist. `projection.py` is still a Phase 1 stub - nothing under `storage/`, `api/` or `cli/`
 exists yet.
 
-Phase 0.5 (house rules) is complete, ahead of Phase 1. The rule-config type is `HouseRules` in
-`house_rules.py`; each contract declares its own options through `option_defaults()`/
-`validate_options()` (the plunge/splash doubles-and-marks minimums and the nello/nello_low/sevens
-mark floor all live in `contract_options`, not as class attributes); `new_game` rejects an invalid
-house-rule set via `contracts.validate_house_rules` before a game is ever created; and declared
-leads (`allow_declared_lead`: `never`/`first_trick`/`always`, DESIGN.md §5.2) let a leader name
-which end of a two-ended tile is the suit led, recorded on `Trick.declared_suit` and read through
-`trick_rules.suit_led` rather than derived. Phase 1 (persistence) is next - see ROADMAP.md.
+Phase 0.5 (house rules) is complete. The rule-config type is `HouseRules` in `house_rules.py`;
+each contract declares its own options through `option_defaults()`/`validate_options()` (the
+plunge/splash doubles-and-marks minimums and the nello/nello_low/sevens mark floor all live in
+`contract_options`, not as class attributes); `new_game` rejects an invalid house-rule set via
+`contracts.validate_house_rules` before a game is ever created; and declared leads
+(`allow_declared_lead`: `never`/`first_trick`/`always`, DESIGN.md §5.2) let a leader name which end
+of a two-ended tile is the suit led, recorded on `Trick.declared_suit` and read through
+`trick_rules.suit_led` rather than derived.
+
+Phase 1 (persistence) is under way. 1.1 (item shapes and codec) is complete: `t42.storage.codec`
+encodes and decodes `GameState`, `HouseRules` and every `Event` to the plain
+dict/list/str/int/bool/None shapes boto3's resource-level `Table` API accepts directly, with no
+boto3 dependency and no database - proven by a round-trip property test in `tests/storage/` that
+drives real games (all six contracts, plunge confirmation, declared leads) through `new_game`/
+`apply_move` and asserts `decode(encode(x)) == x` on every intermediate state. Event emission is
+not yet wired into `apply_move` - nothing constructs `Event` instances outside tests yet - and
+replay (1.2) and the repository (1.3, first real boto3 dependency) are next - see ROADMAP.md.
 
 ## Layout
 
@@ -52,10 +61,14 @@ src/t42/engine/     pure rules library (Phase 0 - complete)
     game.py         new_game / apply_move / legal_moves entry points
     errors.py       RulesError, IllegalMove, OutOfTurn, UnknownContract
     projection.py   player-specific view                                   stub (Phase 1)
-src/t42/storage/    DynamoDB event log + materialized state   (Phase 1, not created)
+src/t42/storage/    DynamoDB event log + materialized state   (Phase 1, in progress)
+    codec.py        GameState/HouseRules/Event <-> plain attribute maps (1.1 - complete)
 src/t42/api/        Lambda handlers behind API Gateway        (Phase 2, not created)
 src/t42/cli/        thin command-line client                  (Phase 3, not created)
-tests/engine/       mirrors the engine modules; test_full_game.py is the Phase 0 milestone demo
+tests/engine/       mirrors the engine modules; test_full_game.py is the Phase 0 milestone demo;
+                    _helpers.py's `drive_to_game_over`/`prefer_contract` are reused by
+                    tests/storage/ to generate real states for the codec round-trip test
+tests/storage/      mirrors src/t42/storage/
 ```
 
 ## Commands

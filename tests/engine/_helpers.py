@@ -3,10 +3,13 @@ exactly which dominoes each seat holds. Not collected as a test module (no test_
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from random import Random
 
 from t42.engine.dominoes import FULL_SET, Domino
-from t42.engine.house_rules import HouseRules
+from t42.engine.game import apply_move, legal_moves
+from t42.engine.house_rules import STANDARD_CONTRACT, HouseRules
+from t42.engine.moves import ConfirmBid, Move, Pass, PlaceBid
 from t42.engine.state import GameState, HandState, Phase, PlayerId, Seat, Team
 
 PLAYERS: dict[Seat, PlayerId] = {
@@ -63,3 +66,57 @@ def custom_deal(**explicit_by_seat_name: tuple[Domino, ...]) -> dict[Seat, tuple
             hands[seat] = tuple(leftover[:7])
             leftover = leftover[7:]
     return hands
+
+
+def first_option(state: GameState, options: tuple[Move, ...]) -> Move:
+    return options[0]
+
+
+Chooser = Callable[[GameState, tuple[Move, ...]], Move]
+
+
+def prefer_contract(contract_name: str) -> Chooser:
+    """Steer bidding toward ``contract_name``. A numeric point bid's ``Bid.contract`` is ``None``,
+    not ``"standard"`` (the engine only fills in the standard name once bidding resolves), so
+    ``"standard"`` is normalized to that ``None`` target here."""
+    target = None if contract_name == STANDARD_CONTRACT else contract_name
+
+    def choose(state: GameState, options: tuple[Move, ...]) -> Move:
+        if state.phase is Phase.BIDDING:
+            for_target = [o for o in options if isinstance(o, PlaceBid) and o.contract == target]
+            if for_target:
+                return min(for_target, key=lambda o: o.marks or 0)
+            confirms = [o for o in options if isinstance(o, ConfirmBid)]
+            if confirms:
+                return next(o for o in confirms if o.accept)
+            passes = [o for o in options if isinstance(o, Pass)]
+            if passes:
+                return passes[0]
+        return options[0]
+
+    return choose
+
+
+def drive_to_game_over(
+    state: GameState,
+    choose: Chooser,
+    rng: Random,
+    *,
+    max_moves: int = 500,
+    on_state: Callable[[GameState], None] | None = None,
+) -> GameState:
+    """Play ``state`` to ``GAME_OVER``. ``on_state``, if given, is called with the state produced
+    by every move - the hook the codec round-trip test uses to snapshot every phase a real game
+    passes through, rather than just the final one."""
+    for _ in range(max_moves):
+        if state.phase is Phase.GAME_OVER:
+            return state
+        seat = state.to_act
+        assert seat is not None
+        options = legal_moves(state, player_of(seat))
+        assert options, f"{player_of(seat)} has no legal moves in {state.phase}"
+        move = choose(state, options)
+        state = apply_move(state, move, rng=rng)
+        if on_state is not None:
+            on_state(state)
+    raise AssertionError(f"game did not reach GAME_OVER within {max_moves} moves")
