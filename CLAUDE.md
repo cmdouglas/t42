@@ -34,7 +34,7 @@ plunge/splash doubles-and-marks minimums and the nello/nello_low/sevens mark flo
 of a two-ended tile is the suit led, recorded on `Trick.declared_suit` and read through
 `trick_rules.suit_led` rather than derived.
 
-Phase 1 (persistence) is under way, still with no boto3 dependency or database.
+Phase 1 (persistence) is under way. boto3 landed in 1.3 - see below.
 
 1.1 (item shapes and codec) is complete: `t42.storage.codec` encodes and decodes `GameState`,
 `HouseRules` and every `Event` to the plain dict/list/str/int/bool/None shapes boto3's
@@ -54,7 +54,22 @@ randomizing, so dealing runs through its real code path even though the outcome 
 history. Proven against real games (all six contracts, plunge confirmation, declared leads, and a
 multi-hand random smoke test) in `tests/storage/test_replay.py`.
 
-Repository writes (1.3, the first real boto3 dependency) are next - see ROADMAP.md.
+1.3 (repository writes) is complete: `t42.storage.repository` is the first real boto3 dependency.
+`create_game` deals the first hand and writes `META`, the opening `HAND_DEALT` event, `STATE`
+(`version=1`) and one `PLAYER#` item per seat in a single `TransactWriteItems` call; `get_state`
+reads the materialized `STATE` item back into a `StoredGame(state, version)`; `append(table,
+game_id, events, new_state, expected_version)` writes further events and the resulting state in
+one transaction, conditioned on `expected_version` still matching what's stored, and also updates
+`META.last_activity_at` and every `PLAYER#` item's turn status. A stale `expected_version` raises
+`VersionConflict` (`t42.storage.errors`, alongside `GameNotFound`/`GameAlreadyExists`) - the
+optimistic-concurrency guarantee 1.6 will exercise concurrently. `version` lives only in
+`StoredGame`, never on `GameState` itself (invariant 1). Tested against `moto`'s in-memory
+DynamoDB (`tests/storage/conftest.py`'s `table` fixture) rather than DynamoDB Local, which stays
+reserved for 1.6's integration tests per ROADMAP.md; one test drives a full game through
+`create_game`/`append` and confirms `t42.storage.replay.replay` over the resulting event log
+reproduces the same `STATE` item, tying 1.2 and 1.3 together.
+
+Idempotency (1.4) is next - see ROADMAP.md.
 
 ## Layout
 
@@ -78,13 +93,17 @@ src/t42/storage/    DynamoDB event log + materialized state   (Phase 1, in progr
     codec.py        GameState/HouseRules/Event <-> plain attribute maps (1.1 - complete)
     events.py       move/deal -> Event (write direction)                (1.2 - complete)
     replay.py       Event log -> GameState via real new_game/apply_move (1.2 - complete)
+    repository.py   create_game/get_state/append against DynamoDB       (1.3 - complete)
+    errors.py       GameNotFound, GameAlreadyExists, VersionConflict    (1.3 - complete)
 src/t42/api/        Lambda handlers behind API Gateway        (Phase 2, not created)
 src/t42/cli/        thin command-line client                  (Phase 3, not created)
 tests/engine/       mirrors the engine modules; test_full_game.py is the Phase 0 milestone demo;
                     _helpers.py's `drive_to_game_over`/`prefer_contract` (plus its `on_state`/
                     `on_transition` hooks) are reused by tests/storage/ to generate real games for
-                    the codec and replay round-trip tests
-tests/storage/      mirrors src/t42/storage/
+                    the codec, replay and repository round-trip tests
+tests/storage/      mirrors src/t42/storage/; conftest.py's `table` fixture is a moto-backed
+                    in-memory DynamoDB table, used by test_repository.py (real DynamoDB Local is
+                    reserved for 1.6's integration tests)
 ```
 
 ## Commands
