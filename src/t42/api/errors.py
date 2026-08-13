@@ -34,6 +34,8 @@ from t42.storage.errors import (
     GameNotJoinable,
     InvalidCredentials,
     InvalidToken,
+    NotInvited,
+    PlayerNotFound,
     RuleSetNotFound,
     SeatTaken,
     UsernameTaken,
@@ -93,6 +95,9 @@ _MAPPING: Final[tuple[tuple[type[Exception], int, str], ...]] = (
     # 404 - no such thing
     (GameNotFound, status.HTTP_404_NOT_FOUND, "GAME_NOT_FOUND"),
     (RuleSetNotFound, status.HTTP_404_NOT_FOUND, "RULE_SET_NOT_FOUND"),
+    (PlayerNotFound, status.HTTP_404_NOT_FOUND, "PLAYER_NOT_FOUND"),
+    # 403 - well-formed, correctly authenticated, but not allowed
+    (NotInvited, status.HTTP_403_FORBIDDEN, "NOT_INVITED"),
     # 409 - the world is not in the state this request assumed
     (OutOfTurn, status.HTTP_409_CONFLICT, "OUT_OF_TURN"),
     (VersionConflict, status.HTTP_409_CONFLICT, "VERSION_CONFLICT"),

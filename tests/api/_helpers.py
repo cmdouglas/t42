@@ -54,8 +54,8 @@ class Client:
 
     # -- game shortcuts, each asserting the happy path so tests read as intent ------------------
 
-    def create_game(self, seat: int = 0, **house_rules: Any) -> str:
-        body: dict[str, Any] = {"seat": seat}
+    def create_game(self, seat: int = 0, visibility: str = "public", **house_rules: Any) -> str:
+        body: dict[str, Any] = {"seat": seat, "visibility": visibility}
         if house_rules:
             body["house_rules"] = house_rules
         response = self.post("/games", body)
@@ -67,6 +67,18 @@ class Client:
 
     def view(self, game_id: str) -> dict[str, Any]:
         response = self.get(f"/games/{game_id}")
+        assert response.status_code == 200, response.text
+        body: dict[str, Any] = response.json()
+        return body
+
+    def invite(self, game_id: str, username: str) -> Response:
+        return self.post(f"/games/{game_id}/invites", {"username": username})
+
+    def decline_or_revoke_invite(self, game_id: str, player_id: str) -> Response:
+        return self.http.delete(f"/games/{game_id}/invites/{player_id}", headers=self.auth)
+
+    def my_invites(self) -> dict[str, Any]:
+        response = self.get("/players/me/invites")
         assert response.status_code == 200, response.text
         body: dict[str, Any] = response.json()
         return body

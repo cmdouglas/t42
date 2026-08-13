@@ -45,7 +45,7 @@ from mypy_boto3_dynamodb.service_resource import Table
 from t42.engine.state import PlayerId
 
 from ._dynamo import as_text, is_transaction_cancelled, transact_write
-from .errors import InvalidCredentials, InvalidToken, UsernameTaken
+from .errors import InvalidCredentials, InvalidToken, PlayerNotFound, UsernameTaken
 
 #: scrypt cost parameters. ``n=2**14`` with ``r=8`` needs ~16 MiB per hash, which is a sane bar on
 #: a 128 MB Lambda and takes well under a second. They are recorded in each stored hash rather
@@ -263,6 +263,20 @@ def get_player(table: Table, player_id: PlayerId) -> Player:
     if item is None:
         raise KeyError(f"no player with id {player_id!r}")
     return _player_from_item(item)
+
+
+def player_for_username(table: Table, username: str) -> PlayerId:
+    """Resolves a username to a player id, for inviting somebody by name (ROADMAP.md 2.7.2).
+
+    Unlike :func:`authenticate`, this is meant to be a public existence check - an invite is
+    necessarily addressed by a name the inviter can find, so there is no oracle to protect against
+    here the way there is for sign-in. Raises :class:`~t42.storage.errors.PlayerNotFound` for an
+    unknown username.
+    """
+    reservation = table.get_item(Key={"PK": _username_pk(username), "SK": "PLAYER"}).get("Item")
+    if reservation is None:
+        raise PlayerNotFound(username)
+    return as_text(reservation["player_id"])
 
 
 def authenticate(table: Table, username: str, password: str) -> PlayerId:

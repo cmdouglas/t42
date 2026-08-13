@@ -28,6 +28,7 @@ import secrets
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from enum import StrEnum
 from random import Random
 from typing import Any, Final
 
@@ -46,8 +47,10 @@ from .errors import (
     GameAlreadyStarted,
     GameNotFound,
     GameNotJoinable,
+    NotInvited,
     SeatTaken,
 )
+from .invites import find_invite, revoke_invite
 from .repository import GameStatus, start_game
 
 #: Game ids double as join codes (DESIGN.md §4.1), so they get read aloud and typed from a phone
@@ -79,6 +82,15 @@ def new_game_code() -> GameId:
     return "".join(secrets.choice(_CODE_ALPHABET) for _ in range(_CODE_LENGTH))
 
 
+class Visibility(StrEnum):
+    """Who may take a seat at a table (DESIGN.md §6.2). Lives here rather than next to
+    ``GameStatus`` in ``repository.py`` because it is purely a lobby-lifecycle concept - nothing
+    about it survives into ``GameState`` or the engine."""
+
+    PUBLIC = "public"
+    INVITE_ONLY = "invite_only"
+
+
 @dataclass(frozen=True, slots=True)
 class SeatAssignment:
     """Who is in a seat. Carries the username alongside the id so rendering a lobby or a game
@@ -96,6 +108,7 @@ class Lobby:
 
     game_id: GameId
     status: GameStatus
+    visibility: Visibility
     config: HouseRules
     seats: Mapping[Seat, SeatAssignment]
     created_at: str
@@ -149,6 +162,7 @@ def create_pending_game(
     seat: Seat,
     config: HouseRules,
     *,
+    visibility: Visibility = Visibility.PUBLIC,
     now: Callable[[], datetime] = _utcnow,
 ) -> Lobby:
     """Opens a lobby with its creator in ``seat`` and nobody else.
@@ -156,6 +170,9 @@ def create_pending_game(
     Validates ``config`` here rather than leaving it to ``new_game``: the deal is three joins
     away, and an unusable rule set that only surfaced then would strand a lobby that three people
     had already joined.
+
+    ``visibility`` defaults to :attr:`Visibility.PUBLIC`, which is exactly today's behaviour -
+    anyone with the code may join (DESIGN.md §6.2).
 
     Raises :class:`~t42.storage.errors.GameAlreadyExists` if the code is in use.
     """
@@ -169,6 +186,7 @@ def create_pending_game(
                 "PK": _game_pk(game_id),
                 "SK": "META",
                 "status": GameStatus.WAITING.value,
+                "visibility": visibility.value,
                 "seats": _encode_seats(seats),
                 "config": encode_house_rules(config),
                 "created_at": timestamp,
@@ -185,6 +203,7 @@ def create_pending_game(
     return Lobby(
         game_id=game_id,
         status=GameStatus.WAITING,
+        visibility=visibility,
         config=config,
         seats=seats,
         created_at=timestamp,
@@ -216,6 +235,7 @@ def get_lobby(table: Table, game_id: GameId) -> Lobby:
     return Lobby(
         game_id=game_id,
         status=GameStatus(normalized["status"]),
+        visibility=Visibility(normalized["visibility"]),
         config=decode_house_rules(normalized["config"]),
         seats=_decode_seats(normalized["seats"]),
         created_at=as_text(normalized["created_at"]),
@@ -239,8 +259,19 @@ def join_seat(
     current lobby rather than raising, whether or not the game has since been dealt.
 
     Raises :class:`~t42.storage.errors.SeatTaken` if somebody else got there first,
-    :class:`~t42.storage.errors.AlreadySeated` if you already hold a different seat, and
-    :class:`~t42.storage.errors.GameNotJoinable` once the game is past its lobby.
+    :class:`~t42.storage.errors.AlreadySeated` if you already hold a different seat,
+    :class:`~t42.storage.errors.GameNotJoinable` once the game is past its lobby, and
+    :class:`~t42.storage.errors.NotInvited` if the table is ``invite_only`` and ``player_id`` holds
+    no invite to it (DESIGN.md §6.2).
+
+    **The invite check is a read-then-write, deliberately** - the same trade-off the rest of this
+    function already makes. Its one window is an invite revoked in the seconds between the read
+    above and the claim below, which lets one join through that should have been refused. Closing
+    it would mean promoting the claim to a transaction with a ``ConditionCheck`` on the invite
+    item, which costs the precise ``ConditionalCheckFailedException`` attribution the claim
+    depends on to tell the caller which way they lost - seat taken, or game already dealt. Against
+    the threat model in DESIGN.md §6.1 that is a bad trade: the failure is one unwanted player at a
+    casual game, and the remedy is to not invite them again.
     """
     lobby = get_lobby(table, game_id)
     held = lobby.seat_of(player_id)
@@ -252,6 +283,8 @@ def join_seat(
         raise GameNotJoinable(game_id, lobby.status.value)
     if seat in lobby.seats:
         raise SeatTaken(game_id, seat.value)
+    if lobby.visibility is Visibility.INVITE_ONLY and not find_invite(table, game_id, player_id):
+        raise NotInvited(game_id)
 
     try:
         table.update_item(
@@ -275,6 +308,9 @@ def join_seat(
         raise SeatTaken(game_id, seat.value) from exc
 
     _put_player_game_item(table, game_id, player_id, seat, GameStatus.WAITING)
+    # A no-op for a public game, which never had one. Unconditional rather than gated on
+    # ``visibility`` so a stray invite to a public table (nothing forbids one) is cleaned up too.
+    revoke_invite(table, game_id, player_id)
 
     lobby = get_lobby(table, game_id)
     if lobby.is_full:

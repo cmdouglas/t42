@@ -30,12 +30,21 @@ from t42.storage.accounts import (
     hash_token,
     issue_token,
     list_tokens,
+    player_for_username,
     revoke_token,
 )
-from t42.storage.errors import GameAlreadyExists, GameNotFound, VersionConflict
+from t42.storage.errors import (
+    AlreadySeated,
+    GameAlreadyExists,
+    GameNotFound,
+    GameNotJoinable,
+    VersionConflict,
+)
 from t42.storage.events import events_for_move
+from t42.storage.invites import find_invite, invite_player, list_invites_for_player, revoke_invite
 from t42.storage.lobby import (
     Lobby,
+    Visibility,
     create_pending_game,
     get_lobby,
     join_seat,
@@ -61,6 +70,9 @@ from .schemas import (
     GameListResponse,
     GameResponse,
     GameSummaryResponse,
+    InviteListResponse,
+    InviteRequest,
+    InviteResponse,
     JoinGameRequest,
     PlayDominoRequest,
     PlayerResponse,
@@ -198,7 +210,13 @@ def create_game(table: TableDep, player_id: CurrentPlayer, body: CreateGameReque
     for _ in range(_CODE_ATTEMPTS):
         try:
             lobby = create_pending_game(
-                table, new_game_code(), player_id, username, body.seat, config
+                table,
+                new_game_code(),
+                player_id,
+                username,
+                body.seat,
+                config,
+                visibility=Visibility(body.visibility),
             )
         except GameAlreadyExists:
             continue
@@ -219,9 +237,67 @@ def join_game(
 
 @app.get("/games/{game_id}")
 def read_game(table: TableDep, player_id: CurrentPlayer, game_id: GameId) -> GameResponse:
+    """A caller need not be seated to read a lobby: an invitee weighing whether to join, or
+    anyone with the code to a public table still filling up, may see the lobby fields (with
+    ``view: null``) without taking a seat (DESIGN.md §6.2). Anyone else gets a 403.
+    """
+    lobby = get_lobby(table, game_id)
+    if lobby.seat_of(player_id) is None:
+        publicly_visible = lobby.visibility is Visibility.PUBLIC and lobby.status is (
+            GameStatus.WAITING
+        )
+        if not publicly_visible and not find_invite(table, game_id, player_id):
+            raise not_a_player(game_id)
+    return _game_response(table, lobby, player_id)
+
+
+# -------------------------------------------------------------------------------------- invites
+
+
+@app.post("/games/{game_id}/invites", status_code=status.HTTP_201_CREATED)
+def create_invite(
+    table: TableDep, player_id: CurrentPlayer, game_id: GameId, body: InviteRequest
+) -> InviteResponse:
+    """Any seated player may invite - there is no host role (DESIGN.md §6.2)."""
     lobby = get_lobby(table, game_id)
     _require_seat(lobby, player_id)
-    return _game_response(table, lobby, player_id)
+    if lobby.status is not GameStatus.WAITING:
+        raise GameNotJoinable(game_id, lobby.status.value)
+    invitee_id = player_for_username(table, body.username)
+    seat = lobby.seat_of(invitee_id)
+    if seat is not None:
+        raise AlreadySeated(game_id, seat.value)
+    invite_player(table, game_id, invitee_id, body.username)
+    return InviteResponse(game_id=game_id, player_id=invitee_id, username=body.username)
+
+
+@app.delete("/games/{game_id}/invites/{target_player_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_invite(
+    table: TableDep, player_id: CurrentPlayer, game_id: GameId, target_player_id: PlayerId
+) -> None:
+    """A seated player revokes somebody else's invite, or the invitee declines their own - the
+    same delete either way, gated on the caller being one or the other (DESIGN.md §6.2)."""
+    lobby = get_lobby(table, game_id)
+    if lobby.seat_of(player_id) is None and player_id != target_player_id:
+        raise not_a_player(game_id)
+    revoke_invite(table, game_id, target_player_id)
+
+
+@app.get("/players/me/invites")
+def my_invites(table: TableDep, player_id: CurrentPlayer) -> InviteListResponse:
+    """Enriches each pending invite with a lobby read and drops any game no longer ``WAITING`` -
+    a bounded fan-out over a handful of rows in exchange for a list that's never stale
+    (ROADMAP.md 2.7.2). ``invites.py`` itself stays a dumb row read."""
+    games = []
+    for pending in list_invites_for_player(table, player_id):
+        try:
+            lobby = get_lobby(table, pending.game_id)
+        except GameNotFound:
+            continue
+        if lobby.status is not GameStatus.WAITING:
+            continue
+        games.append(GameResponse.of(lobby, None))
+    return InviteListResponse(games=games)
 
 
 # ---------------------------------------------------------------------------------------- moves
@@ -344,12 +420,14 @@ def _require_seat(lobby: Lobby, player_id: PlayerId) -> None:
 def _game_response(table: Table, lobby: Lobby, player_id: PlayerId) -> GameResponse:
     """A game as ``player_id`` may see it.
 
-    The projected view is present only once the game has been dealt. ``project`` is called
-    unconditionally on whatever state exists, never bypassed or partially reimplemented - it is
-    the one gate hidden information passes through (invariant 5).
+    The projected view is present only for a caller who is seated (DESIGN.md §6.2) - replacing the
+    older test of whether the game had been dealt, now that a non-seated caller can reach this
+    too. ``project`` is still called unconditionally on whatever state exists for a seated caller,
+    never bypassed or partially reimplemented - it is the one gate hidden information passes
+    through (invariant 5).
     """
     view: dict[str, Any] | None = None
-    if lobby.status is not GameStatus.WAITING:
+    if lobby.seat_of(player_id) is not None:
         try:
             view = project(get_state(table, lobby.game_id).state, player_id)
         except GameNotFound:  # pragma: no cover - only if META and STATE disagree

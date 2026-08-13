@@ -171,10 +171,23 @@ class CreateGameRequest(_Strict):
     seat: Seat = Seat.NORTH
     house_rules: HouseRulesRequest = Field(default_factory=HouseRulesRequest)
     rule_set_id: str | None = None
+    visibility: Literal["public", "invite_only"] = "public"
 
 
 class JoinGameRequest(_Strict):
     seat: Seat
+
+
+class InviteRequest(_Strict):
+    """Invite a player to a table by username (DESIGN.md §6.2)."""
+
+    username: _Username
+
+
+class InviteResponse(BaseModel):
+    game_id: str
+    player_id: PlayerId
+    username: str
 
 
 class BidBody(_Strict):
@@ -244,13 +257,16 @@ class SeatResponse(BaseModel):
 class GameResponse(BaseModel):
     """A game as one player sees it.
 
-    ``view`` is ``None`` while the game is still filling its lobby - there is no state to project
-    until the deal - and otherwise carries :func:`t42.engine.projection.project`'s output verbatim.
-    See this module's docstring for why it is not modelled field by field.
+    ``view`` is ``None`` for a caller who is not seated - there is either no state yet to project
+    (the game is still filling its lobby) or, per DESIGN.md §6.2, a non-seated caller simply never
+    reaches :func:`t42.engine.projection.project`, which stays the one gate hidden information
+    passes through even as who may *read* a lobby widens. See this module's docstring for why
+    ``view`` is not modelled field by field.
     """
 
     game_id: str
     status: str
+    visibility: str
     seats: list[SeatResponse]
     house_rules: dict[str, Any]
     view: dict[str, Any] | None = None
@@ -260,6 +276,7 @@ class GameResponse(BaseModel):
         return cls(
             game_id=lobby.game_id,
             status=lobby.status.value,
+            visibility=lobby.visibility.value,
             seats=[
                 SeatResponse(seat=seat.value, player_id=a.player_id, username=a.username)
                 for seat, a in sorted(lobby.seats.items())
@@ -287,6 +304,14 @@ class GameSummaryResponse(BaseModel):
 
 class GameListResponse(BaseModel):
     games: list[GameSummaryResponse]
+
+
+class InviteListResponse(BaseModel):
+    """ "My pending invites" (DESIGN.md §6). Reuses ``GameResponse`` rather than a parallel shape -
+    every listed invite is exactly a lobby the caller isn't seated in yet, so ``view`` is always
+    ``None`` on each entry."""
+
+    games: list[GameResponse]
 
 
 def _house_rules_json(rules: HouseRules) -> dict[str, Any]:

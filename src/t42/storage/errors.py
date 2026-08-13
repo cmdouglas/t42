@@ -115,3 +115,21 @@ class RuleSetNotFound(StorageError):
     def __init__(self, rule_set_id: str) -> None:
         super().__init__(f"no rule set found with id {rule_set_id!r}")
         self.rule_set_id = rule_set_id
+
+
+class PlayerNotFound(StorageError):
+    """No ``USERNAME#`` reservation resolves to a player (ROADMAP.md 2.7.2). Raised by
+    ``accounts.player_for_username`` when inviting someone by a name that doesn't exist."""
+
+    def __init__(self, username: str) -> None:
+        super().__init__(f"no player found with username {username!r}")
+        self.username = username
+
+
+class NotInvited(StorageError):
+    """``join_seat`` rejected a claim on an ``invite_only`` table because the player holds no
+    invite to it (DESIGN.md §6.2)."""
+
+    def __init__(self, game_id: str) -> None:
+        super().__init__(f"game {game_id!r} is invite-only and you have not been invited")
+        self.game_id = game_id
