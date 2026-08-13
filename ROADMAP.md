@@ -366,13 +366,136 @@ marked `integration`, plays a full scripted 4-player game from signup to `GAME_O
 
 ---
 
+## Phase 2.7: Tables - rule sets, invites, visibility
+
+Goal: everything about setting a table up, finished before the CLI is written. Saved house-rule
+sets, tables that are public or invite-only, invites addressed by username, and a browse of public
+tables with seats free.
+
+This lands before Phase 3 for the same reason Phase 0.5 landed before Phase 1: the CLI's command set
+should be written once against the finished surface rather than grown into it, and three of these
+four features add commands.
+
+It is a fractional phase so that Phase 3 stays the CLI and nothing downstream renumbers. The
+fraction is **2.7** rather than the more natural 2.5 because Phase 2 already has a subsection 2.5
+(contract tests), cited by name from several test modules - "ROADMAP.md 2.5" has to keep meaning one
+thing. Phase 2's last subsection is 2.6, so 2.7 is simply the next free number after it.
+
+Semantics are settled in DESIGN.md §5.1 (saved sets), §6.2 (visibility and invites) and §4.1 (the
+new item shapes and the `OpenGames` index) - read those first. Two decisions from there shape the
+work below: applying a saved set **copies** it, and an invite is a **permission grant** rather than
+a seat reservation.
+
+### 2.7.1 Saved rule sets
+
+`t42/storage/rule_sets.py` and one new item type, `PLAYER#<id> / RULESET#<ruleSetId>`, holding a
+display name and the encoded `HouseRules`.
+
+- `create_rule_set`, `get_rule_set`, `list_rule_sets`, `update_rule_set`, `delete_rule_set`, plus a
+  `RuleSetNotFound` under the existing `StorageError` base. Reuse `codec.encode_house_rules` /
+  `decode_house_rules` - the stored config is the same shape as `META.config`, deliberately, so
+  there is no second encoder to keep in step.
+- **Validate on save**, through `contracts.validate_house_rules`, for the same reason
+  `create_pending_game` does rather than deferring to `new_game`: a set that only fails at the table
+  is a trap saved weeks earlier.
+- `update_rule_set` is a full replace of name and rules, conditioned on `attribute_exists(SK)`, so
+  editing something already deleted is an error rather than a resurrection.
+- Five endpoints under `/players/me/rule-sets` (DESIGN.md §6). Authorization needs no check of its
+  own: the items live in the caller's own partition, so somebody else's id is a miss, not a leak.
+- `CreateGameRequest` gains `rule_set_id`, mutually exclusive with the inline `house_rules` body.
+  Detecting "supplied both" needs a pydantic `model_validator` reading `model_fields_set`, because
+  `house_rules` has a `default_factory` and an absent field is otherwise indistinguishable from a
+  defaulted one.
+
+Self-contained and changes no existing behaviour, so it goes first.
+
+### 2.7.2 Visibility and invites
+
+- `Visibility` (`public`/`invite_only`) on `META`, carried on `Lobby`, defaulting to `public` -
+  which is exactly today's behaviour, so the existing suite must pass unchanged. `get_lobby` reads
+  the attribute directly with no `.get()` fallback, matching the codec's stance that a new field is
+  a migration point; nothing is deployed, so there is no data to migrate.
+- `t42/storage/invites.py`: the `GAME#/INVITE#` and `PLAYER#/INVITE#` pair written and deleted in
+  one `transact_write`, plus `invite_player`, `find_invite`, `list_invites_for_player`,
+  `revoke_invite`. `invite_player` is idempotent - re-inviting overwrites and returns, since clients
+  retry.
+- **The check goes inside `join_seat`**, after the existing held-seat/status/seat-taken checks and
+  before the conditional claim, raising a new `NotInvited`. Storage stays the single authority on
+  who may sit down. Document the read-then-write window in the docstring, as that module already
+  does for its other races - the reasoning is in DESIGN.md §6.2 and the short version is that
+  promoting the claim to a transaction would cost the error attribution the claim depends on.
+- A successful claim revokes the invite, so it leaves the invitee's pending list.
+- Three endpoints (DESIGN.md §6). `POST /games/{id}/invites` takes a username, which needs a new
+  `accounts.player_for_username` - only `authenticate` reads the `USERNAME#` item today, and
+  privately - plus a `PlayerNotFound`. Reject inviting somebody already seated, or into a game past
+  `WAITING`.
+- `GET /players/me/invites` enriches each row with a `get_lobby` read for seat counts and house
+  rules and drops games no longer `WAITING`. A bounded N+1 over a handful of pending invites, in
+  exchange for a list that is never stale; keep the enrichment in the handler and the storage
+  function a dumb row read.
+- **`GET /games/{id}` authorization widens** to seated / invited-or-public-waiting / everybody else
+  (DESIGN.md §6.2). The mechanical change is that `_game_response` projects when the caller is
+  **seated**, replacing today's test of whether the game has been dealt.
+
+### 2.7.3 Open-games browse
+
+- The `OpenGames` GSI goes into `tests/conftest.py`'s `_create_texas42_table`, which both the moto
+  and DynamoDB-Local fixtures already build from, so the schema cannot drift between them.
+- `create_pending_game` writes `GSI1PK`/`GSI1SK` only for a public game; `start_game`'s `META`
+  update gains `REMOVE GSI1PK, GSI1SK`. That update is the only exit from `WAITING`, so there is no
+  second removal site to remember.
+- `lobby.list_open_games(table, *, limit)`: one query on the index, `ScanIndexForward=False`.
+- `GET /games/open` filters out tables the caller is already seated in - free, since the index
+  projects `ALL` and the seats map comes along.
+
+### 2.7.4 Tests
+
+Same split the repo already uses: storage against moto, API through `TestClient` only, nothing
+reaching past the API into storage.
+
+- `tests/storage/test_rule_sets.py` - CRUD; an incoherent set is rejected at save; one player cannot
+  read another's.
+- `tests/storage/test_invites.py` - both items written and both deleted; `join_seat` refuses an
+  uninvited player on an invite-only game, consumes the invite on success, and is unaffected on a
+  public one.
+- `tests/storage/test_lobby.py` - `list_open_games` is newest-first, excludes invite-only games, and
+  a game leaves the index when dealt.
+- `tests/api/test_rule_sets.py` - the contract matrix; a game created from a saved set; **the
+  snapshot guarantee**: edit the set afterwards and assert the game's rules are unchanged. A foreign
+  `rule_set_id` is 404; supplying both `rule_set_id` and `house_rules` is 400.
+- `tests/api/test_invites.py` - invite by username, it appears in the invitee's list, they join, it
+  disappears; an uninvited join is 403; an invitee reading the game gets `view: null`; a stranger
+  gets 403.
+- `tests/api/test_open_games.py` - a public table appears, an invite-only one does not, a dealt one
+  drops off, and the caller's own tables are filtered out.
+- `tests/storage/test_lobby_integration.py`, marked `integration` - the index against real DynamoDB
+  Local, **polling** rather than asserting immediately. GSI propagation is asynchronous and moto is
+  strongly consistent, so this is the one guarantee moto cannot establish.
+
+### Exit criteria
+
+- A rule set survives save, edit and apply, and a table created from one is immune to later edits to
+  it - proven by test, since this is a guarantee and not just current behaviour
+- An invite-only table cannot be joined by an uninvited player, and a consumed invite disappears
+- A public table appears in the browse and leaves it when dealt
+- `GET /games/{id}` never projects for a caller who is not seated
+- The default suite passes unchanged apart from additions: `public` is the default, so nothing that
+  existed before this phase changes meaning
+
+---
+
 ## Later phases
 
-- **Phase 3, CLI**: the command set in DESIGN.md §7, then a dogfooded 4-player game
+- **Phase 3, CLI**: the command set in DESIGN.md §7 plus the Phase 2.7 surface - saving and applying
+  rule sets, creating an invite-only table, inviting by username, and browsing open tables - then a
+  dogfooded 4-player game
 - **Phase 4, Notifications**: DynamoDB Streams to Lambda to SES, verified across a real delay.
   Also the natural home for the deferred account work: password reset and email verification,
   which need a send channel and have none before this point
 - **Phase 5, Hardening**: abandoned games, CLI errors and help, observability, login rate limiting
+- **Phase 6, Bot players**: DESIGN.md §13. Bot accounts, a uniform-random-legal policy over the
+  projected view's `legal_moves`, and a Streams-driven turn trigger reusing Phase 4's plumbing. Last
+  on purpose - a bot is a client of the finished API, so everything else has to work first
 
 ### Open sequencing question: when does anything get deployed?
 
