@@ -12,22 +12,24 @@ from t42.engine.events import Event
 from t42.engine.game import apply_move, legal_moves
 from t42.engine.house_rules import HouseRules
 from t42.engine.moves import Move
-from t42.engine.state import GameState
+from t42.engine.state import GameState, Seat
 from t42.storage.errors import GameAlreadyExists, GameNotFound, VersionConflict
 from t42.storage.events import events_for_move, hand_dealt_event
+from t42.storage.lobby import create_pending_game
 from t42.storage.replay import replay
-from t42.storage.repository import append, create_game, get_state
+from t42.storage.repository import append, get_state
 
 from ..engine._helpers import PLAYERS, drive_to_game_over, prefer_contract
+from ._helpers import started_game
 
 
 def _create(
     table: Table, game_id: str, *, seed: int = 0, config: HouseRules | None = None
 ) -> GameState:
-    return create_game(table, game_id, PLAYERS, config or HouseRules(), Random(seed))
+    return started_game(table, game_id, seed=seed, config=config)
 
 
-def test_create_game_round_trips_through_get_state(table: Table) -> None:
+def test_a_filled_lobby_deals_a_game_that_round_trips_through_get_state(table: Table) -> None:
     state = _create(table, "g1")
 
     stored = get_state(table, "g1")
@@ -36,10 +38,10 @@ def test_create_game_round_trips_through_get_state(table: Table) -> None:
     assert stored.version == 1
 
 
-def test_create_game_rejects_a_duplicate_game_id(table: Table) -> None:
+def test_create_pending_game_rejects_a_duplicate_game_id(table: Table) -> None:
     _create(table, "g1")
     with pytest.raises(GameAlreadyExists):
-        _create(table, "g1")
+        create_pending_game(table, "g1", "someone", "someone", Seat.NORTH, HouseRules())
 
 
 def test_get_state_rejects_an_unknown_game_id(table: Table) -> None:
@@ -149,7 +151,7 @@ def test_last_activity_at_advances_on_append(table: Table) -> None:
     created_at = datetime(2026, 1, 1, tzinfo=UTC)
     later = datetime(2026, 1, 1, 0, 5, tzinfo=UTC)
 
-    state = create_game(table, "g1", PLAYERS, HouseRules(), Random(0), now=lambda: created_at)
+    state = started_game(table, "g1", now=lambda: created_at)
     seat = state.to_act
     assert seat is not None
     move = legal_moves(state, PLAYERS[seat])[0]
@@ -168,7 +170,7 @@ def test_full_game_through_repository_reaches_game_over_and_matches_replay(table
     game_id = "full-game"
     rng = Random(7)
 
-    state = create_game(table, game_id, PLAYERS, config, rng)
+    state = started_game(table, game_id, config=config)
     assert state.hand is not None
     logged_events: list[Event] = [hand_dealt_event(state.hand)]
     version_deltas: list[int] = []

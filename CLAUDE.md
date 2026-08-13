@@ -106,7 +106,40 @@ more than one land or produce a mixed state, and a full scripted game persisted 
 round-trips through `replay()` exactly as the moto-backed version does. With this, Phase 1's exit
 criteria (ROADMAP.md) are all met.
 
-Phase 2 (API) is next - see ROADMAP.md.
+Phase 2 (API) is complete: a FastAPI app behind Mangum implementing DESIGN.md §6, with every
+endpoint covered by the four-case contract matrix and a full game playable signup-to-`GAME_OVER`
+over HTTP. It settled the two things DESIGN.md left open, both recorded there:
+
+- **Identity** (§6.1, §12): username + password minting **per-device bearer tokens**, hashed with
+  stdlib `scrypt` (passwords) and `sha256` (tokens, being high-entropy). A player holds many
+  tokens, so signing in on a phone leaves a desktop alone and losing one device revokes one
+  credential. `PlayerId` is opaque, never the username, so usernames stay renameable and never
+  enter the immutable event log. Contacts are a list of `{kind, address, verified}` channels, not
+  an `email` field, so Phase 4 adds a branch rather than a migration. `t42/storage/accounts.py`.
+- **The lobby** (§4.1): a game is created `WAITING` with only its creator seated, and the join
+  that fills the fourth seat deals and flips it to `ACTIVE` - conditioned on the status still
+  being `WAITING`, which is what makes two simultaneous fourth joins deal exactly once. It lives
+  entirely in `t42/storage/lobby.py`; the engine still has no notion of a partially seated game.
+  This reworked `repository.create_game` into `start_game`, whose `META` write is now a
+  conditional `Update` rather than a `Put`.
+
+Two things worth knowing before touching the API layer:
+
+- **`GameResponse.view` is deliberately opaque.** It carries `project()`'s output verbatim rather
+  than through a pydantic model mirroring it. A model would be a second definition of the
+  projected shape sitting next to the one gate invariant 5 requires, free to drift - and a
+  drifted mirror is how a field leaks. The cost is a vaguer OpenAPI schema for that one field.
+- **An idempotency key is checked twice**, before the move and again after a rejection. 1.4's
+  marker inside `append` is necessary but not sufficient once a handler sits on top: the handler
+  re-derives the move from fresh state, so a retry arriving after the turn moved on is rejected
+  as out-of-turn long before `append` ever sees the marker. `repository.find_request` is the
+  up-front look; the second look catches parallel retries that both miss it. See `api/app.py`'s
+  `_submit`, which is the single write path behind all three move endpoints.
+
+Deployment is deliberately not part of Phase 2 - there is a Mangum entry point and nothing
+provisioned. ROADMAP.md carries the open sequencing question about when that changes.
+
+Phase 3 (CLI) is next - see ROADMAP.md.
 
 ## Layout
 
@@ -126,22 +159,33 @@ src/t42/engine/     pure rules library (Phase 0 - complete)
     game.py         new_game / apply_move / legal_moves entry points
     errors.py       RulesError, IllegalMove, OutOfTurn, UnknownContract
     projection.py   project(state, player_id): the hidden-information gate (1.5 - complete)
-src/t42/storage/    DynamoDB event log + materialized state   (Phase 1, complete)
-    codec.py        GameState/HouseRules/Event <-> plain attribute maps (1.1 - complete)
-    events.py       move/deal -> Event (write direction)                (1.2 - complete)
-    replay.py       Event log -> GameState via real new_game/apply_move (1.2 - complete)
-    repository.py   create_game/get_state/append against DynamoDB       (1.3 - complete)
-    errors.py       GameNotFound, GameAlreadyExists, VersionConflict    (1.3 - complete)
-src/t42/api/        Lambda handlers behind API Gateway        (Phase 2, not created)
+src/t42/storage/    DynamoDB event log + materialized state   (Phases 1 and 2, complete)
+    _dynamo.py      shared boto3 plumbing: transact_write, Decimal and str narrowing
+    codec.py        GameState/HouseRules/Event <-> plain attribute maps (1.1)
+    events.py       move/deal -> Event (write direction)                (1.2)
+    replay.py       Event log -> GameState via real new_game/apply_move (1.2)
+    repository.py   start_game/get_state/append/find_request, GameStatus (1.3, 1.4, 2.2)
+    lobby.py        create_pending_game/join_seat/list_games_for_player  (2.2)
+    accounts.py     players, passwords, per-device bearer tokens         (2.1)
+    errors.py       GameNotFound, VersionConflict, SeatTaken, InvalidToken, ...
+src/t42/api/        FastAPI app behind Mangum                 (Phase 2, complete)
+    app.py          the eleven endpoints; `_submit` is the one write path for moves (2.4)
+    deps.py         table handle and the bearer-token dependency, both overridable (2.4)
+    schemas.py      pydantic request/response bodies; the bid body is discriminated (2.3)
+    errors.py       domain exception -> status code + machine-readable code          (2.3)
+    lambda_handler.py  `Mangum(app)`, nothing else                                   (2.6)
 src/t42/cli/        thin command-line client                  (Phase 3, not created)
+tests/conftest.py   the `table` (moto) and `real_table` (DynamoDB Local via testcontainers)
+                    fixtures, shared by tests/storage/ and tests/api/
 tests/engine/       mirrors the engine modules; test_full_game.py is the Phase 0 milestone demo;
                     _helpers.py's `drive_to_game_over`/`prefer_contract` (plus its `on_state`/
                     `on_transition` hooks) are reused by tests/storage/ to generate real games for
                     the codec, replay and repository round-trip tests
-tests/storage/      mirrors src/t42/storage/; conftest.py's `table` fixture is a moto-backed
-                    in-memory DynamoDB table, used by test_repository.py; `real_table` is its
-                    integration-test counterpart, a real DynamoDB Local in Docker via
-                    testcontainers, used only by test_repository_integration.py (1.6 - complete)
+tests/storage/      mirrors src/t42/storage/; _helpers.py's `started_game` reaches a dealt game
+                    the way a real one is reached, through the lobby rather than around it
+tests/api/          contract tests over FastAPI's in-process TestClient, with `table` injected
+                    via `app.dependency_overrides`; _helpers.py's `Client`/`play_until` drive a
+                    whole game over HTTP, and every test goes through the public API only
 ```
 
 ## Commands
@@ -178,7 +222,11 @@ These are the rules that keep the design working. Breaking one is a design chang
    plunge, sevens and splash goes behind the `Contract` protocol in `contracts/`. Do not add
    `if contract == "nello"` branches to the bidding or trick code.
 5. **Hidden information has exactly one gate.** `projection.project()` is the only thing that
-   decides what a player may see. No handler or client may hand out anything else.
+   decides what a player may see. No handler or client may hand out anything else, and nothing
+   may re-declare the projected shape - a response model mirroring it would be a second
+   definition free to drift from the gate, so `GameResponse.view` passes it through opaquely.
+   `tests/api/test_moves.py` sweeps every response of a whole game to prove nothing leaks at the
+   wire, not just at `project()`.
 6. **Events are the persistence contract.** The dataclasses in `events.py` are what gets written to
    DynamoDB. Changing a field is a data migration, so treat their shape as an interface.
 

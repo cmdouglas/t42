@@ -38,3 +38,67 @@ class VersionConflict(StorageError):
         )
         self.game_id = game_id
         self.expected_version = expected_version
+
+
+class SeatTaken(StorageError):
+    """Someone is already sitting in the requested seat. A 409 (ROADMAP.md 2.2)."""
+
+    def __init__(self, game_id: str, seat: int) -> None:
+        super().__init__(f"seat {seat} in game {game_id!r} is already taken")
+        self.game_id = game_id
+        self.seat = seat
+
+
+class GameNotJoinable(StorageError):
+    """The game is past its lobby - already dealt, or finished - so no seat can be claimed."""
+
+    def __init__(self, game_id: str, status: str) -> None:
+        super().__init__(f"game {game_id!r} is {status} and cannot be joined")
+        self.game_id = game_id
+        self.status = status
+
+
+class AlreadySeated(StorageError):
+    """The player already holds a different seat in this game. One body, one seat."""
+
+    def __init__(self, game_id: str, seat: int) -> None:
+        super().__init__(f"you are already seated at seat {seat} in game {game_id!r}")
+        self.game_id = game_id
+        self.seat = seat
+
+
+class GameAlreadyStarted(StorageError):
+    """``start_game`` found the game already dealt. Raised when two attempts to deal the same
+    full lobby race; the loser sees this, which is a benign outcome rather than an error to
+    surface (ROADMAP.md 2.2)."""
+
+    def __init__(self, game_id: str) -> None:
+        super().__init__(f"game {game_id!r} has already been dealt")
+        self.game_id = game_id
+
+
+class UsernameTaken(StorageError):
+    """The ``USERNAME#`` reservation is already held (ROADMAP.md 2.1)."""
+
+    def __init__(self, username: str) -> None:
+        super().__init__(f"the username {username!r} is already taken")
+        self.username = username
+
+
+class InvalidCredentials(StorageError):
+    """Sign-in failed.
+
+    Deliberately does not distinguish an unknown username from a wrong password, and carries
+    neither in its message: telling the two apart turns the sign-in endpoint into a username
+    oracle (DESIGN.md §6.1).
+    """
+
+    def __init__(self) -> None:
+        super().__init__("invalid username or password")
+
+
+class InvalidToken(StorageError):
+    """The bearer token does not resolve to a player - never issued, or revoked since."""
+
+    def __init__(self) -> None:
+        super().__init__("the supplied token is not valid")

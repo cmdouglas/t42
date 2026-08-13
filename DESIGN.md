@@ -50,11 +50,26 @@ Table: `Texas42` (single-table design)
 
 | PK | SK | Item type |
 |---|---|---|
-| `GAME#<gameId>` | `META` | Game metadata: players, seat order, status, created_at, and the game's house rules (enabled contracts, per-contract options, doubles-as-own-suit flag, marks-to-win, default 7 - see section 5.1) |
+| `GAME#<gameId>` | `META` | Game metadata: seats (each with player id and username), `status` of `WAITING`/`ACTIVE`/`COMPLETE`, created_at, last_activity_at, and the game's house rules (enabled contracts, per-contract options, doubles-as-own-suit flag, marks-to-win, default 7 - see section 5.1) |
 | `GAME#<gameId>` | `EVENT#<seq>` | One immutable event: bid, pass, trump declaration, domino play |
-| `GAME#<gameId>` | `STATE` | Materialized current full state (server-side only — includes all hands), plus `version` for optimistic locking |
-| `PLAYER#<playerId>` | `GAME#<gameId>` | Lookup: which games a player is in, and their seat/turn status (for "my games" queries and notification targeting) |
+| `GAME#<gameId>` | `STATE` | Materialized current full state (server-side only — includes all hands), plus `version` for optimistic locking. Does not exist until the game is `ACTIVE` |
+| `PLAYER#<playerId>` | `GAME#<gameId>` | Lookup: which games a player is in, and their seat/turn/game status (for "my games" queries and notification targeting) |
 | `GAME#<gameId>` | `REQUEST#<requestId>` | Idempotency marker for a mutating request, storing the version it produced - a duplicate submission with the same client-generated request ID is a no-op returning the recorded version (section 9) |
+| `PLAYER#<playerId>` | `PROFILE` | Username, contact channels, created_at (section 6.1) |
+| `USERNAME#<lowercased>` | `PLAYER` | Username uniqueness reservation, claimed by conditional put |
+| `TOKEN#<sha256(token)>` | `TOKEN` | Auth token: player id, device label, created_at, last_used_at, expires_at |
+| `PLAYER#<playerId>` | `TOKEN#<sha256>` | Reverse lookup, so a player can list and revoke their devices |
+
+A game's id doubles as its join code (section 2): six characters from an alphabet omitting `I`,
+`L`, `O`, `U`, `0` and `1`, so it survives being read aloud or typed from a phone screen. No
+separate code-to-game lookup is needed, and a collision surfaces as the same conditional-put
+failure that rejects a duplicate game id.
+
+**Game lifecycle.** A game is created `WAITING` with only its creator seated, and players join
+seats until it is full; the join that fills the fourth seat deals the first hand and flips
+`status` to `ACTIVE` in one transaction, conditioned on `status` still being `WAITING` so two
+simultaneous fourth joins cannot deal twice. This lives entirely in the storage layer: the rules
+engine has no notion of a partially seated game, and `new_game` still takes four seats and deals.
 
 Event example:
 ```json
@@ -176,19 +191,53 @@ Ranking needs no change at all. `rank_in_suit` already ranks a tile by its *othe
 
 ## 6. API Surface (MVP)
 
-REST-ish, one Lambda per action or a single router Lambda behind API Gateway:
+REST-ish, a single FastAPI app behind one Lambda (via Mangum) and API Gateway:
 
-- `POST /games` — create game, returns game code
+- `POST /players` — register: username + password, returns the player id and a first token
+- `POST /sessions` — sign in on a device, returns a bearer token
+- `DELETE /sessions/current` — sign out, revoking this device's token
+- `GET /players/me` — own profile, contact channels, and active devices
+- `POST /games` — create game, returns the game code; creator takes a seat
 - `POST /games/{id}/join` — join with a seat
 - `GET /games/{id}` — get my current player-projected view
 - `GET /players/me/games` — list games I'm in, with whose-turn-is-it flags
-- `POST /games/{id}/bid` — submit a bid or pass
+- `POST /games/{id}/bid` — submit a bid, a pass, or a confirmation of a pending bid
 - `POST /games/{id}/contract` — declare trump / nello-partner-sitout / plunge trump-pick, as applicable after winning bid
 - `POST /games/{id}/play` — play a domino
 
-All mutating endpoints: validate via the domain engine, append event + update materialized state transactionally, return the caller's new projected view. Idempotency: each mutating request carries a client-generated request ID; duplicate submissions with the same ID are no-ops returning the prior result.
+All mutating endpoints: validate via the domain engine, append event + update materialized state transactionally, return the caller's new projected view. Idempotency: each mutating request carries a client-generated request ID in an `Idempotency-Key` header; duplicate submissions with the same ID are no-ops returning the prior result.
 
-Auth for MVP: simplest workable option — a per-player API key issued at account creation, passed as a bearer token. (Revisit if a chatbot client needs OAuth-style flows later.)
+The plunge confirmation has no endpoint of its own. It is an auction move, so it rides on `/bid` as one variant of a body discriminated on `kind` (`BID` / `PASS` / `CONFIRM_BID`), which is exactly the engine's move alphabet for that phase.
+
+The client never sends a version. The server reads the current one, applies the move and writes conditionally in the same request, so optimistic-concurrency bookkeeping stays server-side and `version` never appears on the wire. A lost race surfaces as `409`, with no automatic retry — real contention is impossible in a turn-based game, since a concurrent submission by another player is rejected as out-of-turn first and a resubmission by the same player is absorbed by its idempotency key.
+
+### 6.1 Authentication
+
+**Bearer tokens, one per device, revocable individually.** A request proves identity with
+`Authorization: Bearer <token>`; the token resolves to a player id through a single `GetItem` on
+its hash. This is the durable half of the decision, and it is independent of how tokens are
+minted: adding a magic link or an OIDC flow later means adding a way to mint a token, not changing
+the handlers, the game storage, or any client's request path.
+
+Tokens do not expire and are revoked explicitly, matching how a CLI credential file behaves in
+practice and suiting play spread over days. A player accumulates one token per device, so signing
+in on a phone leaves a desktop session alone and losing a device revokes exactly one credential.
+
+Minting for MVP is **username + password**, hashed with `hashlib.scrypt` from the standard
+library. Passwords get a deliberately slow hash; tokens, being high-entropy random values, get
+sha256, which is the appropriate choice for each. Nothing here needs a dependency or an external
+service, so the whole auth path is testable offline.
+
+Two things are deliberately deferred rather than forgotten. **Password reset and email
+verification** need a send channel, which does not exist until Phase 4's SES work, so they land
+there. **Login rate limiting** is Phase 5; until then the floor is scrypt's cost plus error
+messages that do not distinguish an unknown username from a wrong password.
+
+The threat model justifies that floor. An attacker who impersonates a player can see a hand and
+play moves — grief, not fraud. There is no money and no meaningful personal data beyond a display
+name and whatever contact channel a player volunteers. Hidden-information leakage is still design
+priority #2, so this is not nothing, but every option considered clears that bar comfortably; the
+differences between them are about recovery and friction rather than strength.
 
 ## 7. CLI Client (MVP)
 
@@ -262,4 +311,16 @@ None of these require touching the domain engine, persistence layer, or API cont
   - **All-pass**: the dealer may not pass. If the other three seats have all passed, the dealer must place some legal bid — 30 points, or a mark bid for any contract they qualify for.
 - Resolved: enabling both `nello` and `nello_low` in the same game is legal, not a rule-set contradiction. They are two separately registered contracts, so a bidder names the doubles ranking they want by naming the contract; nothing about the game state is ambiguous. A table that plays only one way simply enables only one.
 - Resolved: marks-to-win is configurable per game, defaulting to 7.
-- Player identity/account model: email-based accounts, or something lighter (just a display name + secret game-join code) for MVP?
+- Resolved: player identity/account model. A player is an **opaque server-generated id** with a
+  **unique username** and a **list of contact channels**, authenticated by username + password
+  minting per-device bearer tokens (section 6.1). Three consequences worth stating, since each
+  rules out a lighter option that was on the table:
+  - The id is opaque rather than being the username, so usernames stay renameable and never get
+    embedded in the event log, which is immutable by invariant 6.
+  - Contacts are a list of `{kind, address, verified}` channels rather than a bare `email` field.
+    Phase 4's notification Lambda branches on `kind`, so adding SMS or a chat DM is a new branch
+    rather than a data migration — the same argument section 9 makes for `last_activity_at`.
+    Nothing requires a player to have an email at all.
+  - A bare API key shown once at signup was rejected: moving it to a second device means
+    copy-pasting a secret by hand, and losing it strands the account with no recovery path, since
+    there is no verified channel to recover through.

@@ -1,8 +1,14 @@
-"""Shared fixtures for repository tests. ``table`` (ROADMAP.md 1.3) gives each test its own
-in-memory DynamoDB via moto, so most of the suite never touches a real AWS account or needs
-Docker. ``real_table`` (ROADMAP.md 1.6) is its integration-test counterpart, backed by a real
-DynamoDB Local running in Docker via testcontainers - reserved for ``@pytest.mark.integration``
-tests, which prove nothing in the repository secretly depends on moto's approximation of DynamoDB.
+"""Shared DynamoDB fixtures, used by both ``tests/storage/`` and ``tests/api/``.
+
+``table`` (ROADMAP.md 1.3) gives each test its own in-memory DynamoDB via moto, so most of the
+suite never touches a real AWS account or needs Docker. ``real_table`` (ROADMAP.md 1.6) is its
+integration-test counterpart, backed by a real DynamoDB Local running in Docker via
+testcontainers - reserved for ``@pytest.mark.integration`` tests, which prove nothing in the
+repository secretly depends on moto's approximation of DynamoDB.
+
+These live at the top level rather than under ``tests/storage/`` because the API contract tests
+(ROADMAP.md 2.5) drive the real storage layer too, injecting ``table`` into the app through
+FastAPI's ``dependency_overrides``.
 """
 
 from __future__ import annotations

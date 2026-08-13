@@ -1,0 +1,318 @@
+"""The waiting room: games from creation until the deal (ROADMAP.md 2.2, DESIGN.md §4.1).
+
+DESIGN.md §6 creates a game and then has players join seats one at a time, but the rules engine
+has no notion of a partially seated game - ``new_game`` takes four seats and deals immediately.
+Rather than teach it one, which would put lobby bookkeeping inside the pure engine and make
+``GameState.players`` optional for every module downstream, the whole lifecycle lives here:
+
+``WAITING``
+    ``META`` exists with a partial ``seats`` map and the house rules. No ``STATE`` item yet, so
+    :func:`t42.storage.repository.get_state` raises ``GameNotFound`` for it - correctly, since
+    there is no game state to read until cards are on the table.
+``ACTIVE``
+    The join that filled the fourth seat called :func:`t42.storage.repository.start_game`, which
+    dealt the first hand and flipped the status in one conditional transaction.
+``COMPLETE``
+    ``append`` set it when the final move produced ``Phase.GAME_OVER``.
+
+**Why the seat claim is a conditional update rather than a read-then-write.** Four people invited
+to the same game will click join at the same time. Each claim is a single ``UpdateItem``
+conditioned on that seat being absent from the map, so two players cannot land on one seat no
+matter how the requests interleave. The lobby read that precedes it exists only to produce a
+useful error message, never to decide whether the write is safe.
+"""
+
+from __future__ import annotations
+
+import secrets
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass
+from datetime import UTC, datetime
+from random import Random
+from typing import Any, Final
+
+from botocore.exceptions import ClientError
+from mypy_boto3_dynamodb.service_resource import Table
+
+from t42.engine.contracts import validate_house_rules
+from t42.engine.house_rules import HouseRules
+from t42.engine.state import GameId, GameState, PlayerId, Seat
+
+from ._dynamo import as_text, from_dynamo
+from .codec import decode_house_rules, encode_house_rules
+from .errors import (
+    AlreadySeated,
+    GameAlreadyExists,
+    GameAlreadyStarted,
+    GameNotFound,
+    GameNotJoinable,
+    SeatTaken,
+)
+from .repository import GameStatus, start_game
+
+#: Game ids double as join codes (DESIGN.md §4.1), so they get read aloud and typed from a phone
+#: screen. ``I``/``L``/``O``/``U``/``0``/``1`` are omitted: the first four are confusable in most
+#: fonts, and dropping ``U`` keeps the generator from spelling anything unfortunate.
+_CODE_ALPHABET: Final = "23456789ABCDEFGHJKMNPQRSTVWXYZ"
+_CODE_LENGTH: Final = 6
+
+
+def _utcnow() -> datetime:
+    return datetime.now(UTC)
+
+
+def _game_pk(game_id: GameId) -> str:
+    return f"GAME#{game_id}"
+
+
+def _player_pk(player_id: PlayerId) -> str:
+    return f"PLAYER#{player_id}"
+
+
+def _game_sk(game_id: GameId) -> str:
+    return f"GAME#{game_id}"
+
+
+def new_game_code() -> GameId:
+    """A fresh join code. ~730 million possibilities, and a collision is caught by
+    :func:`create_pending_game`'s conditional put rather than by checking first."""
+    return "".join(secrets.choice(_CODE_ALPHABET) for _ in range(_CODE_LENGTH))
+
+
+@dataclass(frozen=True, slots=True)
+class SeatAssignment:
+    """Who is in a seat. Carries the username alongside the id so rendering a lobby or a game
+    view needs no fan-out of profile reads - the cost is that a later rename would not propagate
+    into games already in progress."""
+
+    player_id: PlayerId
+    username: str
+
+
+@dataclass(frozen=True, slots=True)
+class Lobby:
+    """The ``META`` item, decoded. Everything about a game that is true before it is dealt, and
+    stays true after."""
+
+    game_id: GameId
+    status: GameStatus
+    config: HouseRules
+    seats: Mapping[Seat, SeatAssignment]
+    created_at: str
+    last_activity_at: str
+
+    @property
+    def is_full(self) -> bool:
+        return len(self.seats) == len(Seat)
+
+    @property
+    def open_seats(self) -> tuple[Seat, ...]:
+        return tuple(seat for seat in Seat if seat not in self.seats)
+
+    def seat_of(self, player_id: PlayerId) -> Seat | None:
+        for seat, assignment in self.seats.items():
+            if assignment.player_id == player_id:
+                return seat
+        return None
+
+
+@dataclass(frozen=True, slots=True)
+class GameSummary:
+    """One row of "my games" (DESIGN.md §6). Read straight off the ``PLAYER#`` item, so listing
+    a player's games is a single query with no per-game reads."""
+
+    game_id: GameId
+    status: GameStatus
+    seat: Seat
+    is_my_turn: bool
+
+
+def _encode_seats(seats: Mapping[Seat, SeatAssignment]) -> dict[str, Any]:
+    return {
+        str(seat.value): {"player_id": a.player_id, "username": a.username}
+        for seat, a in seats.items()
+    }
+
+
+def _decode_seats(data: Mapping[str, Any]) -> dict[Seat, SeatAssignment]:
+    return {
+        Seat(int(key)): SeatAssignment(player_id=value["player_id"], username=value["username"])
+        for key, value in data.items()
+    }
+
+
+def create_pending_game(
+    table: Table,
+    game_id: GameId,
+    creator: PlayerId,
+    username: str,
+    seat: Seat,
+    config: HouseRules,
+    *,
+    now: Callable[[], datetime] = _utcnow,
+) -> Lobby:
+    """Opens a lobby with its creator in ``seat`` and nobody else.
+
+    Validates ``config`` here rather than leaving it to ``new_game``: the deal is three joins
+    away, and an unusable rule set that only surfaced then would strand a lobby that three people
+    had already joined.
+
+    Raises :class:`~t42.storage.errors.GameAlreadyExists` if the code is in use.
+    """
+    validate_house_rules(config)
+    timestamp = now().isoformat()
+    seats = {seat: SeatAssignment(player_id=creator, username=username)}
+
+    try:
+        table.put_item(
+            Item={
+                "PK": _game_pk(game_id),
+                "SK": "META",
+                "status": GameStatus.WAITING.value,
+                "seats": _encode_seats(seats),
+                "config": encode_house_rules(config),
+                "created_at": timestamp,
+                "last_activity_at": timestamp,
+            },
+            ConditionExpression="attribute_not_exists(PK)",
+        )
+    except ClientError as exc:
+        if exc.response["Error"]["Code"] == "ConditionalCheckFailedException":
+            raise GameAlreadyExists(game_id) from exc
+        raise
+
+    _put_player_game_item(table, game_id, creator, seat, GameStatus.WAITING)
+    return Lobby(
+        game_id=game_id,
+        status=GameStatus.WAITING,
+        config=config,
+        seats=seats,
+        created_at=timestamp,
+        last_activity_at=timestamp,
+    )
+
+
+def _put_player_game_item(
+    table: Table, game_id: GameId, player_id: PlayerId, seat: Seat, status: GameStatus
+) -> None:
+    table.put_item(
+        Item={
+            "PK": _player_pk(player_id),
+            "SK": _game_sk(game_id),
+            "game_id": game_id,
+            "seat": seat.value,
+            "status": status.value,
+            "is_my_turn": False,
+        }
+    )
+
+
+def get_lobby(table: Table, game_id: GameId) -> Lobby:
+    """The ``META`` item for ``game_id``. Raises ``GameNotFound`` if there is none."""
+    item = table.get_item(Key={"PK": _game_pk(game_id), "SK": "META"}).get("Item")
+    if item is None:
+        raise GameNotFound(game_id)
+    normalized = from_dynamo(item)
+    return Lobby(
+        game_id=game_id,
+        status=GameStatus(normalized["status"]),
+        config=decode_house_rules(normalized["config"]),
+        seats=_decode_seats(normalized["seats"]),
+        created_at=as_text(normalized["created_at"]),
+        last_activity_at=as_text(normalized["last_activity_at"]),
+    )
+
+
+def join_seat(
+    table: Table,
+    game_id: GameId,
+    player_id: PlayerId,
+    username: str,
+    seat: Seat,
+    *,
+    rng: Random | None = None,
+    now: Callable[[], datetime] = _utcnow,
+) -> Lobby:
+    """Claims ``seat`` for ``player_id``, dealing the first hand if that fills the game.
+
+    Idempotent in the way a retried request needs: re-joining a seat you already hold returns the
+    current lobby rather than raising, whether or not the game has since been dealt.
+
+    Raises :class:`~t42.storage.errors.SeatTaken` if somebody else got there first,
+    :class:`~t42.storage.errors.AlreadySeated` if you already hold a different seat, and
+    :class:`~t42.storage.errors.GameNotJoinable` once the game is past its lobby.
+    """
+    lobby = get_lobby(table, game_id)
+    held = lobby.seat_of(player_id)
+    if held == seat:
+        return lobby
+    if held is not None:
+        raise AlreadySeated(game_id, held.value)
+    if lobby.status is not GameStatus.WAITING:
+        raise GameNotJoinable(game_id, lobby.status.value)
+    if seat in lobby.seats:
+        raise SeatTaken(game_id, seat.value)
+
+    try:
+        table.update_item(
+            Key={"PK": _game_pk(game_id), "SK": "META"},
+            UpdateExpression="SET seats.#seat = :assignment, last_activity_at = :ts",
+            ConditionExpression=("#status = :waiting AND attribute_not_exists(seats.#seat)"),
+            ExpressionAttributeNames={"#seat": str(seat.value), "#status": "status"},
+            ExpressionAttributeValues={
+                ":assignment": {"player_id": player_id, "username": username},
+                ":waiting": GameStatus.WAITING.value,
+                ":ts": now().isoformat(),
+            },
+        )
+    except ClientError as exc:
+        if exc.response["Error"]["Code"] != "ConditionalCheckFailedException":
+            raise
+        # Lost a race since the read above. Re-read to say which way we lost.
+        current = get_lobby(table, game_id)
+        if current.status is not GameStatus.WAITING:
+            raise GameNotJoinable(game_id, current.status.value) from exc
+        raise SeatTaken(game_id, seat.value) from exc
+
+    _put_player_game_item(table, game_id, player_id, seat, GameStatus.WAITING)
+
+    lobby = get_lobby(table, game_id)
+    if lobby.is_full:
+        _deal(table, lobby, rng=rng or Random(), now=now)
+        lobby = get_lobby(table, game_id)
+    return lobby
+
+
+def _deal(
+    table: Table, lobby: Lobby, *, rng: Random, now: Callable[[], datetime]
+) -> GameState | None:
+    """Deals a full lobby. Returns ``None`` if somebody else dealt it first, which is a benign
+    outcome rather than an error: the caller wanted a dealt game and there is one."""
+    players = {seat: assignment.player_id for seat, assignment in lobby.seats.items()}
+    try:
+        return start_game(table, lobby.game_id, players, lobby.config, rng, now=now)
+    except GameAlreadyStarted:
+        return None
+
+
+def list_games_for_player(table: Table, player_id: PlayerId) -> tuple[GameSummary, ...]:
+    """Every game ``player_id`` is in, with whose-turn flags (DESIGN.md §6).
+
+    One query against the ``PLAYER#`` partition, reading fields denormalized onto those items by
+    ``join_seat`` and ``append`` - no per-game reads, so the cost does not grow with how many
+    games somebody has going.
+    """
+    response = table.query(
+        KeyConditionExpression="PK = :pk AND begins_with(SK, :prefix)",
+        ExpressionAttributeValues={":pk": _player_pk(player_id), ":prefix": "GAME#"},
+    )
+    summaries = [
+        GameSummary(
+            game_id=as_text(item["game_id"]),
+            status=GameStatus(as_text(item["status"])),
+            seat=Seat(int(from_dynamo(item["seat"]))),
+            is_my_turn=bool(item["is_my_turn"]),
+        )
+        for item in response.get("Items", ())
+    ]
+    return tuple(sorted(summaries, key=lambda s: s.game_id))

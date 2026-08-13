@@ -22,9 +22,10 @@ from t42.engine.state import GameState
 from t42.storage.errors import VersionConflict
 from t42.storage.events import events_for_move, hand_dealt_event
 from t42.storage.replay import replay
-from t42.storage.repository import append, create_game, get_state
+from t42.storage.repository import append, get_state
 
 from ..engine._helpers import PLAYERS, drive_to_game_over, prefer_contract
+from ._helpers import started_game
 
 pytestmark = pytest.mark.integration
 
@@ -38,7 +39,7 @@ def _event_count(table: Table, game_id: str) -> int:
 
 
 def test_create_append_and_read_back(real_table: Table) -> None:
-    state = create_game(real_table, "g1", PLAYERS, HouseRules(), Random(0))
+    state = started_game(real_table, "g1")
     seat = state.to_act
     assert seat is not None
     move = legal_moves(state, PLAYERS[seat])[0]
@@ -54,7 +55,7 @@ def test_create_append_and_read_back(real_table: Table) -> None:
 
 
 def test_concurrent_conflicting_writes_do_not_corrupt_state(real_table: Table) -> None:
-    state = create_game(real_table, "g1", PLAYERS, HouseRules(), Random(0))
+    state = started_game(real_table, "g1")
     seat = state.to_act
     assert seat is not None
     move = legal_moves(state, PLAYERS[seat])[0]
@@ -80,7 +81,7 @@ def test_concurrent_conflicting_writes_do_not_corrupt_state(real_table: Table) -
 
 
 def test_idempotent_replay_of_a_duplicate_request(real_table: Table) -> None:
-    state = create_game(real_table, "g1", PLAYERS, HouseRules(), Random(0))
+    state = started_game(real_table, "g1")
     seat = state.to_act
     assert seat is not None
     move = legal_moves(state, PLAYERS[seat])[0]
@@ -107,7 +108,7 @@ def test_full_scripted_game_persisted_move_by_move(real_table: Table) -> None:
     game_id = "full-game"
     rng = Random(7)
 
-    state = create_game(real_table, game_id, PLAYERS, config, rng)
+    state = started_game(real_table, game_id, config=config)
     assert state.hand is not None
     logged_events: list[Event] = [hand_dealt_event(state.hand)]
     version_deltas: list[int] = []

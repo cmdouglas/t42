@@ -225,11 +225,160 @@ replay of a duplicate request, and a full scripted game persisted move by move.
 
 ---
 
+## Phase 2: API
+
+Goal: the engine reachable over HTTP. FastAPI handlers over `apply_move` plus the repository,
+behind a Mangum adapter for Lambda, implementing the endpoint set in DESIGN.md §6 with
+per-endpoint contract tests.
+
+Two things DESIGN.md left open have to be settled here, and both are data-model decisions rather
+than handler details, so they come first:
+
+- **Player identity**, §12's open question, resolved there: username plus password, minting
+  per-device bearer tokens. See 2.1.
+- **The lobby.** §6 has `POST /games` then `POST /games/{id}/join`, but `repository.create_game`
+  requires all four seats and deals immediately, so there is no representation of a game waiting
+  for players. See 2.2.
+
+Deployment is deliberately **not** in this phase. It stays in Phase 5 until the handlers exist and
+the shape of what needs provisioning is settled by working code rather than guessed at.
+
+### 2.1 Accounts and tokens
+
+`t42/storage/accounts.py`, adding four item types to the existing single table (DESIGN.md §4.1) -
+no GSI, no second table:
+
+| PK | SK | Purpose |
+|---|---|---|
+| `PLAYER#<id>` | `PROFILE` | username, contact channels, created_at |
+| `TOKEN#<sha256(token)>` | `TOKEN` | player_id, device label, created_at, last_used_at, expires_at |
+| `PLAYER#<id>` | `TOKEN#<sha256>` | reverse lookup, so a player can list and revoke devices |
+| `USERNAME#<lowercased>` | `PLAYER` | uniqueness reservation via conditional put |
+
+- `create_player`, `authenticate`, `issue_token`, `player_for_token`, `revoke_token`,
+  `list_tokens`. New `UsernameTaken`, `InvalidCredentials` and `InvalidToken` under the existing
+  `StorageError` base.
+- **Passwords use stdlib `hashlib.scrypt`, tokens use sha256.** A token is a high-entropy random
+  value, so a fast hash is the right one for it and a slow one is right for a password. No new
+  dependency either way. Store the salt and parameters alongside the password hash; compare with
+  `hmac.compare_digest`.
+- **A player has many tokens, one per device**, so signing in on a phone does not disturb a
+  desktop and losing one device revokes one token. No expiry; revocation is explicit. The
+  `expires_at` attribute is written anyway so adding expiry later is not a migration.
+- **`PlayerId` stays opaque**, not the username, so usernames stay renameable and never get
+  embedded in the event log.
+- **Contacts are a list of channels**, `{"kind": "email", "address": ..., "verified": false}`,
+  not a bare `email` attribute - Phase 4 then branches on `kind` and adding SMS or a chat DM is a
+  new branch rather than a migration. Same argument DESIGN.md §9 makes for `last_activity_at`.
+
+### 2.2 Lobby
+
+`t42/storage/lobby.py`, plus a rework of `repository.create_game`. The lobby lives entirely in the
+storage layer: `META` gains `status` and a partial seats map, and the engine is untouched -
+`new_game` still takes four seats and deals.
+
+- `create_pending_game` writes `META` with `status="WAITING"` and a one-seat map. It must call
+  `contracts.validate_house_rules` itself, since `new_game` will not run until the deal and an
+  invalid rule set would otherwise sit in a lobby until the fourth player joined.
+- `join_seat` conditionally claims an empty seat while `status="WAITING"`. Re-joining a seat you
+  already hold is a no-op success, not a conflict.
+- `list_games_for_player` is one `Query` on `PK = PLAYER#<id>`. The `PLAYER#<id> / GAME#<id>`
+  items gain `status` so this needs no fan-out; `append` already rewrites all four of them on
+  every move, so carrying it is nearly free.
+- `create_game` is **reworked, not just renamed**, into `start_game`. `META` already exists by
+  then, so its `Put` with `attribute_not_exists(PK)` becomes an `Update` flipping `status` from
+  `WAITING` to `ACTIVE`, conditioned on `status = "WAITING"`. That condition is what makes two
+  simultaneous fourth joins deal exactly once. The `HAND_DEALT` event, `STATE` and the `PLAYER#`
+  turn-status writes are unchanged.
+- The game id doubles as the join code (DESIGN.md §2): six characters from an alphabet with no
+  `I`, `L`, `O`, `U`, `0` or `1`. Collisions surface as the existing `GameAlreadyExists`.
+- Seat labels are denormalized onto `META` at join time, so rendering a view needs no profile
+  reads.
+
+### 2.3 Schemas and error mapping
+
+`t42/api/schemas.py` and `t42/api/errors.py`.
+
+- The bid body is a **discriminated union** on `kind` (`BID`/`PASS`/`CONFIRM_BID`), mapping 1:1
+  onto the engine's move alphabet. This is where the plunge confirmation lives; §6 lists no
+  endpoint for it, and folding it into the auction endpoint beats inventing a fourth move route.
+- `HouseRulesRequest` converts to `HouseRules` and lets `__post_init__` plus
+  `contracts.validate_house_rules` do the real checking, rather than restating rules in pydantic.
+- **Responses do not re-declare the projection.** The game response is a thin wrapper carrying
+  `project()` output opaquely under `view`. A pydantic mirror of the projected shape would put a
+  second definition of it next to the single gate invariant 5 requires, and the two would drift.
+- Error mapping, each with a machine-readable `code` so the Phase 3 CLI can branch: 401 for a
+  missing or invalid token, 403 for a caller not seated in the game, 404 `GameNotFound`, 409 for
+  `UsernameTaken`/`SeatTaken`/`VersionConflict`/`OutOfTurn`, 400 for `RulesError` and an invalid
+  rule set. Rules rejections are 400 rather than 422 so they stay distinguishable from FastAPI's
+  own validation failures, which already own 422.
+
+### 2.4 Routes
+
+`t42/api/app.py` and `t42/api/deps.py`: `POST /players`, `POST /sessions`,
+`DELETE /sessions/current`, `GET /players/me`, `POST /games`, `POST /games/{id}/join`,
+`GET /games/{id}`, `GET /players/me/games`, `POST /games/{id}/bid`, `POST /games/{id}/contract`,
+`POST /games/{id}/play`.
+
+One shared helper sits behind the three move endpoints and is the heart of the phase: `get_state`,
+build the `Move`, `apply_move`, `events_for_move`, `append` with the read version and the
+`Idempotency-Key` header as `request_id`, then `project`.
+
+- **`VersionConflict` returns 409 with no automatic retry.** Real contention cannot happen in a
+  turn-based game: a second player submitting concurrently is rejected as `OutOfTurn` first, and a
+  double submission by the same player is absorbed by 1.4's idempotency marker. A retry loop would
+  be machinery guarding nothing.
+- The client never supplies a version - the server reads the current one itself - so `version`
+  stays off the wire entirely.
+- `GET /games/{id}` returns the lobby shape while `WAITING`, since no `STATE` item exists yet.
+
+### 2.5 Contract tests
+
+`tests/api/`, over FastAPI's `TestClient` with the moto-backed `table` fixture injected through
+`app.dependency_overrides`. TestClient runs in-process, so there is no HTTP mocking. The `table`
+fixture and `_create_texas42_table` move up to a top-level `tests/conftest.py` so both
+`tests/storage/` and `tests/api/` can use them.
+
+- The four-case matrix from DESIGN.md §10 per mutating endpoint: valid move, invalid move, out of
+  turn, stale version. The stale case is forced by monkeypatching `repository.get_state` to return
+  a `StoredGame` one version behind.
+- Auth: no header, malformed header, revoked token, and a valid token for a player not seated.
+- Idempotency: the same `Idempotency-Key` twice yields one event and identical responses.
+- **Leakage at the HTTP boundary**: drive a full game through the API and assert that no response
+  any of the four players receives contains a tile held by another seat, reusing the structure
+  walker from `tests/engine/test_projection.py`. 1.5 proved this of `project()`; this proves it of
+  what actually goes over the wire.
+
+### 2.6 Lambda entry point and integration test
+
+`t42/api/lambda_handler.py` is `Mangum(app)` and nothing else. `tests/api/test_api_integration.py`,
+marked `integration`, plays a full scripted 4-player game from signup to `GAME_OVER` against the
+`dynamodb_local` fixture from 1.6.
+
+### Exit criteria
+
+- Every endpoint in DESIGN.md §6 exists and is covered by the four-case contract matrix
+- A full 4-player game runs signup to `GAME_OVER` over HTTP against real DynamoDB Local
+- No response any player receives contains another seat's tiles, proven by test rather than
+  inspection
+- A duplicate submission with the same idempotency key is a no-op returning the prior result
+- The engine remains pure: nothing under `t42.engine` imports from `t42.api` (invariant 1)
+
+---
+
 ## Later phases
 
-- **Phase 2, API**: Lambda handlers over `apply_move` + repository, API Gateway, API-key auth,
-  per-endpoint contract tests (valid move, invalid move, out of turn, stale version)
-- **Phase 3, CLI**: the command set in DESIGN.md §7 against the deployed API, then a dogfooded
-  4-player game
-- **Phase 4, Notifications**: DynamoDB Streams to Lambda to SES, verified across a real delay
-- **Phase 5, Hardening**: abandoned games, CLI errors and help, deploy scripting, observability
+- **Phase 3, CLI**: the command set in DESIGN.md §7, then a dogfooded 4-player game
+- **Phase 4, Notifications**: DynamoDB Streams to Lambda to SES, verified across a real delay.
+  Also the natural home for the deferred account work: password reset and email verification,
+  which need a send channel and have none before this point
+- **Phase 5, Hardening**: abandoned games, CLI errors and help, observability, login rate limiting
+
+### Open sequencing question: when does anything get deployed?
+
+Phase 3 was written as "the CLI against the deployed API", but no phase provisions anything until
+Phase 5's deploy scripting, so as written the CLI has nothing to point at. Phase 2 ends with a
+Mangum entry point and an app that runs under `uvicorn` against DynamoDB Local, which is enough to
+build and test the CLI against, so this is not urgent. It needs deciding before Phase 3 ends:
+either pull a minimal stack (table, one Lambda, one HTTP API, IAM) forward out of Phase 5, or
+accept that dogfooding happens against a locally hosted API.
