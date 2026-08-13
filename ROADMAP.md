@@ -1,7 +1,7 @@
 # Roadmap
 
-Execution breakdown for the phases in [DESIGN.md](DESIGN.md) §10. Phases 0 and 1 are broken down
-in full; later phases are sketched and will be expanded as they come up.
+Execution breakdown for the phases in [DESIGN.md](DESIGN.md) §10. Phases 0 through 3 are broken
+down in full; Phases 4 to 6 are sketched and will be expanded as they come up.
 
 Scaffolding is committed: toolchain, engine module layout, and the implemented primitives listed
 under "Done" below.
@@ -484,11 +484,156 @@ reaching past the API into storage.
 
 ---
 
+## Phase 3: CLI client
+
+Goal: the command set in DESIGN.md §7 - every endpoint reachable, a game playable start to finish
+from a terminal, and a dogfooded 4-player game as the milestone. This is the first real client, and
+the first evidence that DESIGN.md §11's claim holds: that a client needs the API and the projected
+view and nothing else.
+
+Read DESIGN.md §7 first; it settles the shape and this section sequences it. Three decisions from
+there govern everything below:
+
+- **The CLI is a client, not a component.** Nothing under `t42.cli` imports `t42.engine`,
+  `t42.storage` or boto3, and it derives nothing the server already tells it - no computing whose
+  turn it is, no deciding whether a move is legal. Both halves are enforced by test (3.7), because
+  an unenforced layering rule is a layering rule that lasts until the first convenient import.
+- **stdlib `argparse`**, and one runtime dependency (an HTTP client) in a new `cli` optional extra.
+- **A locally hosted API.** `uvicorn` over DynamoDB Local, settling the deployment question this
+  file carried as open until now (see the bottom of this file, 3.6, and DESIGN.md §7.3).
+
+### 3.0 The gap the CLI surfaces: `GET /games/{game_id}/invites`
+
+Writing the command set against the finished API turns up one hole. `DELETE
+/games/{id}/invites/{playerId}` is addressed by player id, and nothing hands a caller one:
+`POST /games/{id}/invites` returns it once in a response no client keeps, and
+`GET /players/me/invites` is the invitee's side of the pair. So an invite can be sent but not
+practically revoked, and a lobby cannot show who is pending.
+
+- `invites.list_invites_for_game(table, game_id)` - one `Query` on `PK = GAME#<id>` with
+  `begins_with(SK, "INVITE#")`. No new item shape: that item already stores `player_id` **and**
+  `username` (`invites.py`), because the pair was designed for both directions.
+- `GET /games/{game_id}/invites`, seated callers only, reusing `_require_seat` - the same gate
+  `POST .../invites` already applies, and for the reason DESIGN.md §6.2 gives.
+- `t42 uninvite <code> <username>` then resolves a name to an id through it. The alternative -
+  making the user paste a player id out of earlier terminal output - is what a CLI exists to avoid.
+
+First, for the same reason Phase 2.7 preceded Phase 3 at all: the command set gets written once
+against a finished surface rather than grown into one.
+
+### 3.1 Skeleton, profiles and credentials
+
+`src/t42/cli/`, plus `[project.scripts] t42 = "t42.cli.main:main"`.
+
+- `main.py`: `main(argv: list[str] | None = None) -> int`, one `argparse` subparser table, one
+  dispatch. It **returns** an exit code for every expected failure rather than raising, so a command
+  is a function a test can call and the process boundary carries no logic.
+- `config.py`: `~/.config/t42/config.json` (honouring `XDG_CONFIG_HOME`), written `0600` through a
+  temp-file-and-rename so an interrupted write cannot leave a client with no credentials. Holds the
+  API base URL and a map of named profiles, each `{player_id, username, token}`.
+- **Profiles are load-bearing.** The milestone at the end of this phase is one person playing four
+  seats from one machine; without `--profile` / `T42_PROFILE` that means four home directories.
+- Global flags on every command: `--api-url` (`T42_API_URL`), `--profile`, `--json`.
+
+### 3.2 HTTP client and exit codes
+
+- `api.py`: base URL plus bearer token, `Idempotency-Key` on the three move endpoints, and the
+  `{"error": {"code", "message"}}` envelope decoded into a typed `ApiError` carrying the `code`.
+  That symbol is the contract - `t42/api/errors.py` says in its own docstring that it exists for
+  this client - so nothing here branches on a status code or on message prose.
+- The client is reached through a narrow `Transport` protocol (`send(method, path, json, headers)`)
+  with the real implementation beside it. The indirection earns its place on a concrete blocker, not
+  on principle: `fastapi.testclient.TestClient` is built on httpx 0.28 and the CLI's client is
+  httpx2, so without it 3.7 cannot drive the CLI against the real app in-process and has to start a
+  server to test a `--help` path.
+- `errors.py`: the code-to-exit-status table from DESIGN.md §7.2, in one mapping. An unrecognised
+  code exits `1`, so the server can add a code without breaking an old client.
+
+### 3.3 Rendering
+
+`render.py`: pure functions from response data to text. No HTTP, no argparse, no engine import - it
+takes a dict and returns a string, which is the same testability the engine gets from taking a state
+and returning a state.
+
+- The game view: hand, trump, dealer, marks, current trick with seat labels, whose turn, phase.
+- Lobby, games list, open-games browse, invites (both directions), rule sets, profile.
+- **Legal moves render as the commands that submit them.** This is the CLI being maximally helpful
+  with zero rules knowledge: it is formatting `view["legal_moves"]`, which the server computed.
+- `--json` never reaches this module; it prints the response body and returns.
+
+### 3.4 Account and table commands
+
+`register`, `login`, `logout`, `whoami`; `rules save|list|show|replace|delete`; `create-game`,
+`join`, `open`, `invite`, `invited`, `uninvite`, `decline`, `invites`. The command-to-endpoint table
+is in DESIGN.md §7 and is the checklist for this step.
+
+- House-rule flags (`--contracts`, `--marks`, `--doubles-trump`, `--declared-leads`, and
+  `--set plunge.minimum_doubles=5`) are shared by `create-game` and `rules save|replace`, so they
+  live in one parser-building helper and one flags-to-body function. `--rule-set <id>` is exclusive
+  with them; the CLI rejects the combination as a **usage** error, and does not otherwise second-
+  guess the rules - the server owns validation and returns 400 for the same thing.
+- `--seat` accepts `0-3` or `north|east|south|west`, sending the integer either way.
+
+### 3.5 Play commands
+
+`status`, `games`, `bid`, `declare`, `play`.
+
+- `t42 bid <code> 32 | pass | 2-marks --contract nello | confirm | decline`: five spellings, one
+  endpoint, mapping onto the `kind`-discriminated body. The plunge confirmation rides here for the
+  same reason it rides on `/bid` (DESIGN.md §6).
+- `t42 declare <code> trump=fives | trump=doubles | trump=none`, the last being the no-trump case
+  nello and sevens need.
+- `t42 play <code> 4-1 [--declare treys]`, the flag being a declared lead (DESIGN.md §5.2).
+- Suit and seat names are parsed and printed from the CLI's own label tables, never from the engine
+  enums. Aliases stay accepted on input (`5` for `fives`) because a player typing a bid should not
+  have to know which spelling the wire uses.
+
+### 3.6 Running it locally
+
+The one piece of non-CLI code in the phase. The table definition currently exists only inside
+`tests/conftest.py: _create_texas42_table`, so there is no way to create it outside a test run.
+
+- Promote it to `src/t42/storage/schema.py` - `create_table(dynamodb, name)` plus a
+  `python -m t42.storage.schema` entry point - and have `tests/conftest.py` import it. Both fixtures
+  keep building from one definition, which is the property 2.7.3 wanted when it put the `OpenGames`
+  index in the shared helper; this just widens "shared" to include a local run.
+- README gets the three lines: start DynamoDB Local, create the table, run `uvicorn`.
+- The helper lives in `t42.storage` and not in a `t42 dev` subcommand, because the CLI may not
+  import boto3 (3.7 checks).
+
+### 3.7 Tests
+
+`tests/cli/`, mirroring the split the repo already uses.
+
+- `test_render.py` - table-driven over the pure renderers. Plus **the third leakage proof**: drive a
+  full game, render every view, and assert no tile held by another seat appears in the text. 1.5
+  proved it of `project()`, 2.5 proved it of the wire, this proves it of the screen, which is the
+  only one a player actually looks at.
+- `test_config.py` - `XDG_CONFIG_HOME` pointed at a tmp path: file mode is `0600`, two profiles do
+  not see each other's tokens, logout removes only its own.
+- `test_commands.py` - `main(argv)` end to end, transport pointed at `TestClient(app)` with the moto
+  `table` injected through `app.dependency_overrides`. Every command's happy path, and the error
+  paths that earn each exit code in DESIGN.md §7.2.
+- `test_layering.py` - no module under `t42.cli` imports `t42.engine`, `t42.storage` or boto3.
+  Cheap, and it is the whole difference between DESIGN.md §11 being a claim and being a fact.
+- `tests/cli/test_cli_integration.py`, marked `integration` - four profiles play a full 4-player
+  game to `GAME_OVER` through CLI commands against DynamoDB Local. This is the scripted end-to-end
+  CLI smoke test DESIGN.md §9 has listed since before there was a CLI to script.
+
+### Exit criteria
+
+- Every endpoint in DESIGN.md §6 is reachable from a command, and a full 4-player game plays start
+  to `GAME_OVER` through the CLI alone
+- Nothing under `t42.cli` imports `t42.engine`, `t42.storage` or boto3, proven by test
+- No rendered output ever shows a tile another seat holds, proven by test
+- Every documented failure exits with its documented code, and an unknown server code exits `1`
+- Four profiles play from one machine without interfering, which is also the dogfood milestone
+- The table can be created, and the API run, without invoking pytest
+
+---
+
 ## Later phases
 
-- **Phase 3, CLI**: the command set in DESIGN.md §7 plus the Phase 2.7 surface - saving and applying
-  rule sets, creating an invite-only table, inviting by username, and browsing open tables - then a
-  dogfooded 4-player game
 - **Phase 4, Notifications**: DynamoDB Streams to Lambda to SES, verified across a real delay.
   Also the natural home for the deferred account work: password reset and email verification,
   which need a send channel and have none before this point
@@ -497,11 +642,15 @@ reaching past the API into storage.
   projected view's `legal_moves`, and a Streams-driven turn trigger reusing Phase 4's plumbing. Last
   on purpose - a bot is a client of the finished API, so everything else has to work first
 
-### Open sequencing question: when does anything get deployed?
+### Resolved: when does anything get deployed?
 
-Phase 3 was written as "the CLI against the deployed API", but no phase provisions anything until
-Phase 5's deploy scripting, so as written the CLI has nothing to point at. Phase 2 ends with a
-Mangum entry point and an app that runs under `uvicorn` against DynamoDB Local, which is enough to
-build and test the CLI against, so this is not urgent. It needs deciding before Phase 3 ends:
-either pull a minimal stack (table, one Lambda, one HTTP API, IAM) forward out of Phase 5, or
-accept that dogfooding happens against a locally hosted API.
+Phase 3 was originally written as "the CLI against the deployed API", but nothing is provisioned
+until Phase 5's deploy scripting, so as written the CLI had nothing to point at. **Resolved:
+dogfooding happens against a locally hosted API** - `uvicorn` over DynamoDB Local (3.6) - and
+deploy scripting stays in Phase 5 where it was.
+
+Pulling a minimal stack (table, one Lambda, one HTTP API, IAM) forward was the alternative. It was
+rejected because it buys nothing the CLI needs and costs the phase its focus: the CLI's entire
+coupling to where the server lives is `--api-url`, so pointing it at a provisioned endpoint later
+is a configuration change, and building that endpoint first would only mean choosing a deployment
+tool under time pressure from an unrelated phase.

@@ -269,6 +269,7 @@ REST-ish, a single FastAPI app behind one Lambda (via Mangum) and API Gateway:
 - `GET /games/{id}` - get my current player-projected view
 - `GET /games/open` - browse public tables with seats free, newest first
 - `POST /games/{id}/invites` - invite a player by username; any seated player may
+- `GET /games/{id}/invites` - who is currently invited to this table; seated players only
 - `DELETE /games/{id}/invites/{playerId}` - revoke an invite (a seated player) or decline one (the invitee)
 - `GET /players/me/invites` - my pending invites
 - `GET /players/me/games` - list games I'm in, with whose-turn-is-it flags
@@ -352,6 +353,15 @@ A consumed invite is deleted when the join succeeds, so it stops appearing in th
 list. An invite to a game that fills up without them is left in place and filtered on read, since
 the alternative is a fan-out delete inside the deal transaction to save a row nobody is looking at.
 
+**A table's invites are readable by the players at it.** `GET /games/{id}/invites` is the host-side
+counterpart to `GET /players/me/invites`, gated on the caller being seated - the same gate the
+invite-sending endpoint uses, and for the same reason: who has been asked to a table is table
+information, and every seat may invite. It exists because revoking is addressed by player id and
+nothing else hands one out: `POST /games/{id}/invites` returns the id once, in a response a client
+has no reason to keep, so without this read an invite can be sent but not practically taken back.
+The `GAME#/INVITE#<playerId>` item already carries the invitee's username alongside their id, so
+this is one query and no new item shape.
+
 **Reading a table you are not seated at.** An invitee needs to see the house rules and who is
 already there before deciding, so `GET /games/{id}` widens from strictly-seated to three cases:
 
@@ -368,21 +378,114 @@ around it will show.
 
 ## 7. CLI Client (MVP)
 
-A thin client with no game logic of its own — it renders the projected view and posts moves.
-
-Commands (rough):
-```
-t42 create-game --contracts nello,plunge,sevens,splash --doubles-trump --marks 7 \
-      --set plunge.minimum_doubles=5      # per-contract house-rule options, section 5.1
-t42 join <game-code> --seat 2
-t42 status <game-code>            # show current view: your hand, trump, trick, whose turn
-t42 bid <game-code> 32            # or: t42 bid <game-code> pass
-t42 declare <game-code> trump=5   # after winning the bid
-t42 play <game-code> 4-1
-t42 games                          # list your active games, flag ones waiting on you
-```
+A thin client with no game logic of its own - it renders the projected view and posts moves.
 
 Domino notation: `a-b` (e.g., `6-4`, `5-5`). Status output renders hand, trump, current trick, and score in plain text/ASCII.
+
+**The CLI is a client of the API, not a component of the server.** It imports nothing from
+`t42.engine` and nothing from `t42.storage`, and it carries its own tables of seat and suit names
+rather than importing the enums. That costs a duplicated name table; what it buys is that section
+11's claim - a new client needs the API and the projected view and nothing else - becomes a fact
+provable by an import check rather than an assertion. A CLI that reached for `Suit` to print
+"fives" would be a client that a web or chatbot front end could not be written the same way as, and
+the duplication risk is bounded because a double-six set does not grow an eighth suit.
+
+The same rule from the other direction: the CLI never derives anything the server already says. It
+does not compute whose turn it is, whether a bid is legal, or which tiles may follow - it prints
+`to_act` and formats `legal_moves`. The most it does with rules knowledge is render each legal move
+as the command that would submit it, which is formatting, not deciding.
+
+It is built on stdlib `argparse`, and needs one runtime dependency of its own (an HTTP client),
+carried in a `cli` optional extra so the Lambda bundle does not ship it.
+
+Every endpoint in section 6 is reachable from a command:
+
+| Command | Endpoint |
+|---|---|
+| `t42 register <username>` | `POST /players` |
+| `t42 login <username>` | `POST /sessions` |
+| `t42 logout` | `DELETE /sessions/current` |
+| `t42 whoami` | `GET /players/me` |
+| `t42 rules save <name> [rule flags]` | `POST /players/me/rule-sets` |
+| `t42 rules list` | `GET /players/me/rule-sets` |
+| `t42 rules show <id>` | `GET /players/me/rule-sets/{ruleSetId}` |
+| `t42 rules replace <id> <name> [rule flags]` | `PUT /players/me/rule-sets/{ruleSetId}` |
+| `t42 rules delete <id>` | `DELETE /players/me/rule-sets/{ruleSetId}` |
+| `t42 create-game [rule flags] [--visibility] [--rule-set <id>]` | `POST /games` |
+| `t42 join <code> --seat <seat>` | `POST /games/{id}/join` |
+| `t42 open` | `GET /games/open` |
+| `t42 status <code>` | `GET /games/{id}` |
+| `t42 games` | `GET /players/me/games` |
+| `t42 invite <code> <username>` | `POST /games/{id}/invites` |
+| `t42 invited <code>` | `GET /games/{id}/invites` |
+| `t42 uninvite <code> <username>` | `GET` then `DELETE /games/{id}/invites/{playerId}` |
+| `t42 decline <code>` | `DELETE /games/{id}/invites/{own id}` |
+| `t42 invites` | `GET /players/me/invites` |
+| `t42 bid <code> 32 \| pass \| 2-marks --contract nello \| confirm \| decline` | `POST /games/{id}/bid` |
+| `t42 declare <code> trump=fives \| trump=doubles \| trump=none` | `POST /games/{id}/contract` |
+| `t42 play <code> 4-1 [--declare treys]` | `POST /games/{id}/play` |
+
+The five spellings of `bid` are one command because they are three request bodies on one endpoint,
+discriminated on `kind` - the plunge confirmation being an auction move rather than a phase of its
+own (section 6). `uninvite` is the one command that makes two calls, because revocation is
+addressed by player id and people are not (section 6.2).
+
+House-rule flags on `create-game` and `rules save` follow section 5.1's model directly:
+`--contracts nello,plunge,sevens`, `--marks 7`, `--doubles-trump`, `--declared-leads first_trick`,
+and `--set plunge.minimum_doubles=5` for per-contract options. `--rule-set <id>` is exclusive with
+all of them. `--seat` takes `0-3` or `north|east|south|west`; the wire value stays the integer.
+
+### 7.1 Credentials and profiles
+
+A signed-in device holds its bearer token in `~/.config/t42/config.json` (honouring
+`XDG_CONFIG_HOME`), written `0600`, alongside the API base URL. A file rather than an environment
+variable, because a token minted by `t42 login` has to outlive the shell that ran it - the same
+reasoning that makes tokens non-expiring in section 6.1.
+
+The file holds a map of named **profiles**, each one player: `--profile` or `T42_PROFILE` selects
+one. This is not a convenience. A four-handed game needs four accounts, and the MVP's own
+dogfooding milestone is one person driving all four from one machine; without profiles that means
+four separate home directories. It also happens to be what a Phase 6 bot needs to run beside its
+owner's session.
+
+Signing out revokes the token server-side and drops the profile locally, so the two cannot disagree.
+
+### 7.2 Output and exit codes
+
+Human-readable text by default; `--json` prints the response body verbatim instead. The JSON mode
+exists so scripts and the eventual bot (section 13) consume data rather than parse ASCII, and so
+tests can assert on values rather than on formatting.
+
+Failures are reported from the `code` in the API's error envelope, never from the status alone or
+from the message prose - section 6's error responses carry a stable machine-readable symbol for
+exactly this. The code maps to an exit status:
+
+| Exit | Meaning | Codes |
+|---|---|---|
+| 0 | success | |
+| 1 | unexpected: a network failure, or a code this client does not know | |
+| 2 | usage error, argparse's own convention | |
+| 3 | who are you | `NOT_AUTHENTICATED`, `INVALID_TOKEN`, `INVALID_CREDENTIALS` |
+| 4 | the rules say no | `ILLEGAL_MOVE`, `RULES_ERROR`, `UNKNOWN_CONTRACT`, `INVALID_REQUEST` |
+| 5 | the world moved | `OUT_OF_TURN`, `VERSION_CONFLICT`, `SEAT_TAKEN`, `ALREADY_SEATED`, `GAME_NOT_JOINABLE`, `GAME_NOT_STARTED`, `GAME_ALREADY_EXISTS`, `USERNAME_TAKEN` |
+| 6 | no such thing | `GAME_NOT_FOUND`, `RULE_SET_NOT_FOUND`, `PLAYER_NOT_FOUND` |
+| 7 | not allowed | `NOT_A_PLAYER`, `NOT_INVITED` |
+
+An unrecognised code exits 1 rather than crashing, so the server may add one without breaking a
+client that has not been updated.
+
+Each move command sends a fresh `Idempotency-Key`. It deliberately does not persist one to reuse on
+a retry: in a turn-based game the move that follows yours is somebody else's, so a resubmission the
+CLI makes after a lost response is rejected as `OUT_OF_TURN` before it could ever apply twice. That
+is the same argument section 6 makes for not retrying a `409`, and a pending-request file would be
+machinery guarding a case the turn order already rules out.
+
+### 7.3 What the CLI points at
+
+`--api-url`, or `T42_API_URL`, defaulting to `http://127.0.0.1:8000`. For the MVP that is a local
+`uvicorn` over DynamoDB Local, which is what the dogfooded game is played against; deploy scripting
+stays in Phase 5 (section 10). The base URL is the whole of the CLI's coupling to where the server
+lives, so a provisioned endpoint later is a configuration change and not a code change.
 
 ## 8. Notifications (MVP)
 
@@ -409,8 +512,8 @@ Lambda handlers wrapping the domain engine and persistence layer, behind API Gat
 **Phase 2.7 - Tables**
 Saved rule sets, invite-by-username, public/invite-only visibility, and the open-games browse (sections 5.1, 6.2). Before the CLI on purpose: these are all table-setup surface, and the CLI's command set should be written once against the finished shape rather than grown into it.
 
-**Phase 3 — CLI client**
-Implement the command set above against the deployed API, including the Phase 2.7 commands. Dogfood a full 4-player game manually (can be 4 terminal sessions or 4 test accounts).
+**Phase 3 - CLI client**
+Implement the command set in section 7 against a locally hosted API - `uvicorn` over DynamoDB Local - including the Phase 2.7 commands. Dogfood a full 4-player game manually: four profiles (section 7.1) in four terminal sessions. Nothing is provisioned in this phase; deploy scripting stays in Phase 5, and the CLI reaches a real endpoint later by changing `--api-url` and nothing else.
 
 **Phase 4 — Notifications**
 DynamoDB Streams → Lambda → SES. Verify against real play across a delay (simulate the "hours between moves" case).
@@ -432,6 +535,8 @@ Because the domain engine and the player-projected view are both client-agnostic
 - **Chatbot (Slack/Discord)**: same API; the bot posts the projected view as a formatted message and maps chat commands (`/t42 bid 32`) to the same endpoints. Turn notifications become bot DMs instead of email — again, just a new branch in the notification Lambda.
 
 None of these require touching the domain engine, persistence layer, or API contract, provided the projected-view shape stays generic (plain data, not CLI-formatted text) from day one. Worth double-checking in Phase 1 that `project()` returns structured JSON rather than anything CLI-specific.
+
+The Phase 3 CLI is the first test of this claim rather than a restatement of it, because it imports nothing from `t42.engine` or `t42.storage` (section 7). That is checkable, and checked: if the CLI can be written against the API alone, so can a client that is not written in Python at all.
 
 ## 12. Open Questions
 
@@ -475,6 +580,27 @@ None of these require touching the domain engine, persistence layer, or API cont
   unreplayable against its own rules. Server-provided presets are additive and deferred.
 - Resolved: **bot players are a client of the public API, not a server-side special case**
   (section 13), and are sequenced last.
+- Resolved: **the CLI is a client, not a component** (section 7). It imports nothing from
+  `t42.engine` or `t42.storage` and keeps its own seat and suit label tables, rather than importing
+  the enums for a nicer rendering. The alternative saves a small duplicated name table and costs the
+  only executable evidence for section 11's claim that a non-Python client loses nothing; a suit
+  table cannot drift far, since the tile set is fixed by the game.
+- Resolved: **the CLI is built on stdlib `argparse`**, with its HTTP client as its one dependency,
+  declared in a `cli` optional extra so the Lambda bundle does not carry it. A command framework was
+  considered and rejected on dependency count alone: nothing in the command set needs more than
+  subparsers, and the runtime dependency list is currently three packages.
+- Resolved: **the CLI mints a fresh idempotency key per invocation** rather than persisting one to
+  reuse across a retry (section 7.2). Turn order already rules out the double-application case the
+  persisted key would defend: after your move it is somebody else's turn, so a resubmission is
+  rejected as out-of-turn. This is the same reasoning that makes a `409` non-retryable in section 6.
+- Resolved: **a table's invites are readable by its players** (section 6.2), through
+  `GET /games/{id}/invites`. This was a hole rather than a feature request: revocation is addressed
+  by player id, and until this endpoint no read handed one out, so an invite could be sent but not
+  taken back. Making the `DELETE` accept a username instead was rejected - the stored item is keyed
+  by id, and a rename would then change what a URL means.
+- Resolved: **the MVP CLI is dogfooded against a locally hosted API** (section 7.3), not a deployed
+  one. Deploy scripting stays in Phase 5, where it was, rather than being pulled forward to give the
+  CLI something to point at; `--api-url` is the only thing that changes when a real endpoint exists.
 
 ## 13. Bot Players (post-MVP)
 
