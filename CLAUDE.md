@@ -22,8 +22,7 @@ Phase 0 (pure rules engine) is complete: dealing, bidding (including the plunge 
 sub-flow and the dealer-must-bid all-pass rule), all six contracts (standard, nello, nello_low,
 sevens, plunge, splash), the trick engine, and a full in-memory game per contract, all through the
 public `new_game`/`apply_move`/`legal_moves` entry points. See ROADMAP.md for the exit-criteria
-checklist. `projection.py` is still a Phase 1 stub - nothing under `storage/`, `api/` or `cli/`
-exists yet.
+checklist. Nothing under `api/` or `cli/` exists yet.
 
 Phase 0.5 (house rules) is complete. The rule-config type is `HouseRules` in `house_rules.py`;
 each contract declares its own options through `option_defaults()`/`validate_options()` (the
@@ -80,7 +79,19 @@ since `game_id` is already its idempotency key (`GameAlreadyExists` on a repeat)
 `Event` types, `apply_move` and `t42.storage.replay` stay untouched - idempotency is a repository
 concern only (invariant 1).
 
-Player-specific view (1.5) is next - see ROADMAP.md.
+1.5 (player-specific view) is complete: `t42.engine.projection.project(state, player_id)` is the
+one gate hidden information passes through (invariant 5). Almost everything on `GameState` turns
+out to already be public at a real table - the auction, tricks, marks, declarer and contract - so
+`project()` mostly copies those fields to plain dict/list/str/int/None data, substitutes the
+caller's own tiles for the full `HandState.hands` mapping, and calls `game.legal_moves` directly
+for the `legal_moves` field rather than re-deriving whose turn it is. Its small encoders are
+deliberately not shared with `t42.storage.codec`: `t42.engine` may not import from `t42.storage`
+(invariant 1), and the two serve different purposes - a durable wire format versus a client
+read-model. Proven in `tests/engine/test_projection.py` by a leakage test that drives real games
+(standard and nello, the latter for its sitting-out partner) through every phase and asserts no
+tile held by another seat ever appears anywhere in the projected structure.
+
+Integration tests against DynamoDB Local (1.6) are next - see ROADMAP.md.
 
 ## Layout
 
