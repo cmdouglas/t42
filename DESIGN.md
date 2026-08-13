@@ -12,6 +12,9 @@ In scope:
 - 4-player, fixed-partnership games (2v2, partners seated across from each other)
 - Standard bidding (30–42, points-based) plus mark-based special contracts: nello, plunge, sevens
 - Configurable rule variants selected at game creation: which special contracts are enabled (nello, plunge, sevens, splash, ...) and whether doubles count as their own suit
+- Saved house-rule sets a player can name, edit, and apply to tables they create (section 5.1)
+- Tables created either public or invite-only, with invites addressed by username (section 6.2)
+- A browsable list of public tables with seats free
 - Server-side move validation
 - CLI client for creating/joining games, bidding, and playing
 - Email notification when it's a player's turn
@@ -20,9 +23,10 @@ In scope:
 Out of scope for MVP (noted for later):
 - Web/mobile/chatbot clients
 - Spectators
-- Matchmaking / public lobbies (games are created and joined by invite/game code only)
+- Skill-based matchmaking: the open-table list above is a plain newest-first browse, not a matcher
 - Ranking, stats, tournament play
-- Real-time (websocket) updates — CLI will poll or rely on notification-triggered checks
+- Bot players filling empty seats - designed in section 13, deliberately built last
+- Real-time (websocket) updates - CLI will poll or rely on notification-triggered checks
 
 ## 3. High-Level Architecture
 
@@ -50,7 +54,7 @@ Table: `Texas42` (single-table design)
 
 | PK | SK | Item type |
 |---|---|---|
-| `GAME#<gameId>` | `META` | Game metadata: seats (each with player id and username), `status` of `WAITING`/`ACTIVE`/`COMPLETE`, created_at, last_activity_at, and the game's house rules (enabled contracts, per-contract options, doubles-as-own-suit flag, marks-to-win, default 7 - see section 5.1) |
+| `GAME#<gameId>` | `META` | Game metadata: seats (each with player id and username), `status` of `WAITING`/`ACTIVE`/`COMPLETE`, `visibility` of `public`/`invite_only` (section 6.2), created_at, last_activity_at, and the game's house rules (enabled contracts, per-contract options, doubles-as-own-suit flag, marks-to-win, default 7 - see section 5.1) |
 | `GAME#<gameId>` | `EVENT#<seq>` | One immutable event: bid, pass, trump declaration, domino play |
 | `GAME#<gameId>` | `STATE` | Materialized current full state (server-side only — includes all hands), plus `version` for optimistic locking. Does not exist until the game is `ACTIVE` |
 | `PLAYER#<playerId>` | `GAME#<gameId>` | Lookup: which games a player is in, and their seat/turn/game status (for "my games" queries and notification targeting) |
@@ -59,17 +63,49 @@ Table: `Texas42` (single-table design)
 | `USERNAME#<lowercased>` | `PLAYER` | Username uniqueness reservation, claimed by conditional put |
 | `TOKEN#<sha256(token)>` | `TOKEN` | Auth token: player id, device label, created_at, last_used_at, expires_at |
 | `PLAYER#<playerId>` | `TOKEN#<sha256>` | Reverse lookup, so a player can list and revoke their devices |
+| `PLAYER#<playerId>` | `RULESET#<ruleSetId>` | A saved house-rule set: display name, the encoded `HouseRules`, created_at, updated_at (section 5.1) |
+| `GAME#<gameId>` | `INVITE#<playerId>` | An invite, from the game's side: read as a single `GetItem` when somebody tries to take a seat |
+| `PLAYER#<playerId>` | `INVITE#<gameId>` | The same invite from the invitee's side, so "my pending invites" is one Query |
+
+The `PLAYER#<playerId>` partition now carries five SK prefixes - `PROFILE`, `GAME#`, `TOKEN#`,
+`INVITE#` and `RULESET#` - each list read being a `begins_with` query that cannot see the others.
+The two invite items are one fact stored twice, once per access path, so they are written and
+deleted together in a `TransactWriteItems` call: a half-invite would either be unusable or
+invisible, and neither is a state worth being able to reach.
 
 A game's id doubles as its join code (section 2): six characters from an alphabet omitting `I`,
 `L`, `O`, `U`, `0` and `1`, so it survives being read aloud or typed from a phone screen. No
 separate code-to-game lookup is needed, and a collision surfaces as the same conditional-put
 failure that rejects a duplicate game id.
 
-**Game lifecycle.** A game is created `WAITING` with only its creator seated, and players join
-seats until it is full; the join that fills the fourth seat deals the first hand and flips
-`status` to `ACTIVE` in one transaction, conditioned on `status` still being `WAITING` so two
-simultaneous fourth joins cannot deal twice. This lives entirely in the storage layer: the rules
-engine has no notion of a partially seated game, and `new_game` still takes four seats and deals.
+**Game lifecycle.** A game is created `WAITING`, and either `public` or `invite_only`, with only
+its creator seated; players join seats until it is full. The join that fills the fourth seat deals
+the first hand and flips `status` to `ACTIVE` in one transaction, conditioned on `status` still
+being `WAITING` so two simultaneous fourth joins cannot deal twice. This lives entirely in the
+storage layer: the rules engine has no notion of a partially seated game, and `new_game` still
+takes four seats and deals.
+
+**Open-games index.** Browsing public tables (section 6.2) is the one read that is not addressed by
+a key the caller already holds, so it gets the table's only secondary index: `OpenGames`, on
+`GSI1PK` (hash) and `GSI1SK` (range), projecting `ALL` - `META` is small, and projecting everything
+means a browse row needs no follow-up read.
+
+The index is **sparse**. A `META` item carries `GSI1PK = "OPEN"` and `GSI1SK = <created_at>` only
+while the game is public *and* `WAITING`; every other item in the table omits both attributes and is
+therefore absent from the index entirely. An invite-only game never writes them. A public game drops
+out when it is dealt, because `start_game` removes both attributes in the same conditional update
+that flips `status` to `ACTIVE` - and that update is the only way a game can leave `WAITING`, so
+there is no second place to remember. Browsing is then one query on `GSI1PK = "OPEN"`, descending by
+`GSI1SK`, giving newest-first for free from an ISO-8601 timestamp's lexicographic order.
+
+Two consequences worth writing down. The single `"OPEN"` partition is a hot key, and a real limit at
+some scale well past this project's; the escape is to shard it (`OPEN#<n>` for a small fixed `n`,
+read scatter-gather), which needs no data migration, since the index is derived from `META` and
+DynamoDB rebuilds it. And a GSI is **eventually consistent**: a table created a moment ago may not
+appear in the next browse. That is acceptable - the creator has the join code and does not need the
+list - but it does mean an integration test has to poll rather than assert immediately, and that
+moto, being strongly consistent, will never reproduce the behaviour that makes the polling
+necessary.
 
 Event example:
 ```json
@@ -159,6 +195,32 @@ A contract may narrow a game-wide flag for itself through `contract_options` (a 
 
 **Non-goal.** `HouseRules` selects among registered contracts, sets their numeric terms, and switches the game-wide mechanics enumerated above. It does not let a game invent a contract, and it is not an extension language: every option is a named field or a declared per-contract key that some engine module reads on purpose. Variants not yet modelled (the set penalty, the mark value of a made point bid, the bid floor and ceiling, the all-pass rule) are fixed for now; the point of the mechanism is that adding one later is adding an option, not another refactor.
 
+**Saved rule sets.** A group that plays the same way every week should not retype its rules every
+table, so a player may keep named `HouseRules` values on their account (`RULESET#` in section 4.1)
+and name one when creating a game. This is a convenience layer on top of the model above and
+changes nothing about it: a saved set is exactly a `HouseRules`, stored with the same encoder the
+`META` item uses.
+
+Three properties are load-bearing:
+
+- **Applying a set copies it.** `META.config` already holds the game's own encoded rules, so a table
+  created from a saved set is unaffected by later edits to that set - a game's rules cannot change
+  under the players mid-game, and a replay of an old game reproduces the rules it was actually
+  played under. This falls out of the storage model rather than needing enforcement, but it is a
+  guarantee and should be tested as one.
+- **A set is validated when saved**, through the same `contracts.validate_house_rules` that guards
+  game creation. The reasoning matches the lobby's: an incoherent set that only failed at the table
+  is a trap somebody saved weeks earlier and has since forgotten the shape of.
+- **The id is opaque and the display name is not unique.** Same argument as `PlayerId` (section 12):
+  keying on the name would make renaming a delete-and-recreate. A player keeps a handful of these,
+  so duplicate names are a cosmetic matter for the client to warn about, not a correctness one worth
+  a uniqueness-reservation item.
+
+Sets are private to the player who owns them; they live under that player's partition, so a rule-set
+id belonging to somebody else is simply not found, and access control needs no check of its own.
+Server-provided presets ("tournament", "all contracts") would be purely additive - another source
+`POST /games` can resolve an id against - and are not part of the MVP.
+
 ### 5.2 Declared leads
 
 A house rule some tables play: **the leader may name which of a tile's two ends is the suit led**, instead of the default rule that a non-trump lead calls for its higher end. Leading `3-2`, the leader may call it the three of twos rather than the two of threes, and everyone follows twos.
@@ -193,17 +255,26 @@ Ranking needs no change at all. `rank_in_suit` already ranks a tile by its *othe
 
 REST-ish, a single FastAPI app behind one Lambda (via Mangum) and API Gateway:
 
-- `POST /players` — register: username + password, returns the player id and a first token
-- `POST /sessions` — sign in on a device, returns a bearer token
-- `DELETE /sessions/current` — sign out, revoking this device's token
-- `GET /players/me` — own profile, contact channels, and active devices
-- `POST /games` — create game, returns the game code; creator takes a seat
-- `POST /games/{id}/join` — join with a seat
-- `GET /games/{id}` — get my current player-projected view
-- `GET /players/me/games` — list games I'm in, with whose-turn-is-it flags
-- `POST /games/{id}/bid` — submit a bid, a pass, or a confirmation of a pending bid
-- `POST /games/{id}/contract` — declare trump / nello-partner-sitout / plunge trump-pick, as applicable after winning bid
-- `POST /games/{id}/play` — play a domino
+- `POST /players` - register: username + password, returns the player id and a first token
+- `POST /sessions` - sign in on a device, returns a bearer token
+- `DELETE /sessions/current` - sign out, revoking this device's token
+- `GET /players/me` - own profile, contact channels, and active devices
+- `POST /players/me/rule-sets` - save a named house-rule set
+- `GET /players/me/rule-sets` - list my saved sets
+- `GET /players/me/rule-sets/{ruleSetId}` - read one
+- `PUT /players/me/rule-sets/{ruleSetId}` - replace its name and rules
+- `DELETE /players/me/rule-sets/{ruleSetId}` - delete it
+- `POST /games` - create game, returns the game code; creator takes a seat. Takes either an inline house-rule body or a saved `ruleSetId`, and a `visibility` of `public` (default) or `invite_only`
+- `POST /games/{id}/join` - join with a seat
+- `GET /games/{id}` - get my current player-projected view
+- `GET /games/open` - browse public tables with seats free, newest first
+- `POST /games/{id}/invites` - invite a player by username; any seated player may
+- `DELETE /games/{id}/invites/{playerId}` - revoke an invite (a seated player) or decline one (the invitee)
+- `GET /players/me/invites` - my pending invites
+- `GET /players/me/games` - list games I'm in, with whose-turn-is-it flags
+- `POST /games/{id}/bid` - submit a bid, a pass, or a confirmation of a pending bid
+- `POST /games/{id}/contract` - declare trump / nello-partner-sitout / plunge trump-pick, as applicable after winning bid
+- `POST /games/{id}/play` - play a domino
 
 All mutating endpoints: validate via the domain engine, append event + update materialized state transactionally, return the caller's new projected view. Idempotency: each mutating request carries a client-generated request ID in an `Idempotency-Key` header; duplicate submissions with the same ID are no-ops returning the prior result.
 
@@ -238,6 +309,62 @@ play moves — grief, not fraud. There is no money and no meaningful personal da
 name and whatever contact channel a player volunteers. Hidden-information leakage is still design
 priority #2, so this is not nothing, but every option considered clears that bar comfortably; the
 differences between them are about recovery and friction rather than strength.
+
+### 6.2 Table visibility and invites
+
+Until now the join code has been the whole of a table's access control: holding it is permission to
+sit down, and a table nobody told you about is unreachable. That collapses two separate wishes - "I
+want to play with these three people" and "I want a game, whoever shows up" - into one mechanism
+that serves neither well. So a table declares which it is at creation:
+
+| `visibility` | Who may take a seat | Listed in `GET /games/open` |
+|---|---|---|
+| `public` (default) | Anyone with the code | Yes, while `WAITING` with a seat free |
+| `invite_only` | Only an invited player | Never |
+
+`public` is the default because it is exactly today's behaviour, so nothing that exists changes
+meaning.
+
+**An invite is a permission grant, not a seat reservation.** It records that a player may join, and
+they still pick whichever seat is open when they arrive. The alternative - an invite naming and
+holding a seat - was rejected because it adds a second reason a seat can be unavailable, and seat
+claiming is the one place in the lobby where concurrency actually bites (section 4.1): keeping it a
+single conditional update with exactly one way to fail is worth more than letting a host arrange
+partnerships in advance. A host who cares about seating can say so out of band.
+
+**Any seated player may invite.** There is no host role, and the seats map has no creator field to
+add one to. A casual game fills up by everybody at the table pulling in whoever they know, which is
+also what makes the missing-creator concept a feature rather than an omission.
+
+**The check belongs in the storage layer's seat claim**, next to the existing seat-taken,
+already-seated and not-joinable checks, rather than in a handler. Storage is the single authority on
+who may sit down; a second gate above it is a second thing to keep in agreement with the first.
+
+The check is a read-then-write, deliberately. Its one window is an invite revoked in the seconds
+between the read and the claim, which lets one join through that should have been refused. Closing
+it means promoting the claim to a transaction with a `ConditionCheck` on the invite item, which
+costs the precise `ConditionalCheckFailedException` attribution the claim currently uses to tell the
+caller *which way* they lost - seat taken, or game already dealt. Against the threat model in
+section 6.1 that is a bad trade: the failure is one unwanted player at a casual game, and the
+remedy is to not invite them again.
+
+A consumed invite is deleted when the join succeeds, so it stops appearing in the invitee's pending
+list. An invite to a game that fills up without them is left in place and filtered on read, since
+the alternative is a fan-out delete inside the deal transaction to save a row nobody is looking at.
+
+**Reading a table you are not seated at.** An invitee needs to see the house rules and who is
+already there before deciding, so `GET /games/{id}` widens from strictly-seated to three cases:
+
+| Caller | Response |
+|---|---|
+| Seated | Unchanged: lobby fields plus their projected `view` |
+| Invited, or the table is public and `WAITING` | Lobby fields only, `view: null` |
+| Anyone else | `403` |
+
+The rule this establishes is that **the view is projected only for a seated caller**, replacing the
+current test of whether the game has been dealt. A non-seated caller never reaches `project()` at
+all, which keeps section 4.2's single gate exactly as narrow as it was while widening what the lobby
+around it will show.
 
 ## 7. CLI Client (MVP)
 
@@ -279,14 +406,20 @@ Design and implement the DynamoDB event log + materialized state + `project()` v
 **Phase 2 — API layer**
 Lambda handlers wrapping the domain engine and persistence layer, behind API Gateway. Wire up API keys. Contract tests for each endpoint (valid move, invalid move, out-of-turn, stale version).
 
+**Phase 2.7 - Tables**
+Saved rule sets, invite-by-username, public/invite-only visibility, and the open-games browse (sections 5.1, 6.2). Before the CLI on purpose: these are all table-setup surface, and the CLI's command set should be written once against the finished shape rather than grown into it.
+
 **Phase 3 — CLI client**
-Implement the command set above against the deployed API. Dogfood a full 4-player game manually (can be 4 terminal sessions or 4 test accounts).
+Implement the command set above against the deployed API, including the Phase 2.7 commands. Dogfood a full 4-player game manually (can be 4 terminal sessions or 4 test accounts).
 
 **Phase 4 — Notifications**
 DynamoDB Streams → Lambda → SES. Verify against real play across a delay (simulate the "hours between moves" case).
 
 **Phase 5 — Hardening**
 Abandoned-game handling, better CLI error messages/help, deploy scripting (SAM/CDK/Terraform — pick one), basic logging/observability.
+
+**Phase 6 - Bot players**
+Section 13. Last on purpose: it is the only feature that needs everything else working first, since a bot is a client of the finished API.
 
 Suggested order of effort: Phase 0 is the highest-risk, most logic-dense piece and should be done and well-tested before any AWS resources are provisioned — bugs there are cheapest to fix in isolation.
 
@@ -324,3 +457,57 @@ None of these require touching the domain engine, persistence layer, or API cont
   - A bare API key shown once at signup was rejected: moving it to a second device means
     copy-pasting a secret by hand, and losing it strands the account with no recovery path, since
     there is no verified channel to recover through.
+- Resolved: **an invite is a permission grant, not a seat reservation**, and any seated player may
+  send one (section 6.2). The reservation model was rejected for making seat availability depend on
+  two facts instead of one, in the single lobby operation where concurrency actually bites. There is
+  no host role: the seats map has no creator field, and a casual game filling up by everyone pulling
+  in whoever they know is the behaviour wanted anyway.
+- Resolved: **`public` means browsable, not merely code-joinable** (sections 4.1, 6.2). A public
+  table appears in `GET /games/open` through the sparse `OpenGames` GSI - the table's first
+  secondary index - and leaves it when `start_game` removes the index attributes as it deals. The
+  weaker reading, where public and invite-only differ only in whether the seat claim checks for an
+  invite, was rejected as leaving no way to find a game at all: the code would still have to reach
+  you by some channel outside the system. Accepted costs: one hot index partition, shardable later
+  without a migration, and eventual consistency on the browse.
+- Resolved: **saved rule sets are per-player, opaque-id, and copied on use** (section 5.1). Keying
+  them by display name would make a rename a delete-and-recreate; referencing rather than copying
+  would let a table's rules change under the players mid-game and would make an old game's log
+  unreplayable against its own rules. Server-provided presets are additive and deferred.
+- Resolved: **bot players are a client of the public API, not a server-side special case**
+  (section 13), and are sequenced last.
+
+## 13. Bot Players (post-MVP)
+
+Four-handed partnership games need four people, and asynchronous play means a table can stall for
+days on one absent seat. Bots that fill empty seats are the eventual answer. Nothing here is built;
+this section fixes the shape so the decisions that constrain earlier phases are already made.
+
+**A bot is an ordinary player account.** A `PROFILE` item with `is_bot: true`, a player id, a
+username, and a token - seated through the same join path as anybody else. Neither the rules engine,
+the lobby, nor the repository learns that bots exist, and no seat is a special kind of seat. The
+flag exists so clients can render "Bot Bertha" honestly and so a table can decline bots if it wants
+to; nothing in the game logic branches on it.
+
+**A bot plays through the public HTTP API**, authenticating with its own bearer token and acting on
+exactly the `project()` output every other client gets. This is the load-bearing decision and the
+reason bots are cheap. An in-process bot reading `GameState` directly would be a second consumer of
+hidden information sitting next to the single gate of section 4.2 - and one that, by construction,
+can see every hand. Keeping the bot outside means it *cannot* cheat, and that this is true by the
+same argument that makes it true of the CLI, not by a separate audit.
+
+The consequence worth noticing is that the projected view must be sufficient to play from. It
+already is: `legal_moves` is on every view, so the first policy - pick uniformly at random from the
+legal moves - is a few lines, and the interface is `choose(view) -> move`. That is the same shape as
+the `choose` hook the API test driver already uses to play whole games, so the first bot is
+substantially a promotion of test-harness code.
+
+**Driving it.** Every write already stamps `is_my_turn` onto the four `PLAYER#` items (section 4.1),
+so a DynamoDB Streams reaction on that flip is the natural trigger, and Phase 4 introduces Streams
+for notifications regardless - a bot's turn and a human's turn notification are the same event with
+different deliveries. Polling `GET /players/me/games` is the fallback and is adequate for a game
+measured in hours.
+
+**Left open**, to be settled when the phase is picked up: how a bot gets seated. An explicit "add a
+bot" call from a seated player is the simplest, and auto-filling a table that has sat idle past some
+`last_activity_at` threshold is the more useful; they are not exclusive, and the second overlaps
+Phase 5's abandoned-game work.

@@ -21,7 +21,9 @@ storage in DynamoDB with the event log as the source of truth, and an HTTP API o
 - **Phase 2, API.** FastAPI behind a Mangum adapter: accounts with per-device bearer tokens, a
   lobby, and the move endpoints. A full 4-player game runs signup to game-over over HTTP.
 
-Next: **Phase 3**, the CLI client. Nothing is deployed yet - the API runs locally against
+Next: **Phase 2.7**, tables - saved house-rule sets, invites by username, public or invite-only
+tables, and a browse of open ones. It goes ahead of **Phase 3**, the CLI client, so the command set
+is written once against the finished surface. Nothing is deployed yet - the API runs locally against
 DynamoDB Local, and provisioning is an open question recorded in ROADMAP.md.
 
 ## Layout

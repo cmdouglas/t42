@@ -139,7 +139,11 @@ Two things worth knowing before touching the API layer:
 Deployment is deliberately not part of Phase 2 - there is a Mangum entry point and nothing
 provisioned. ROADMAP.md carries the open sequencing question about when that changes.
 
-Phase 3 (CLI) is next - see ROADMAP.md.
+Phase 2.7 (tables: saved house-rule sets, invites, public/invite-only visibility, and an
+open-games browse) is next, ahead of the CLI so its command set is written once against the
+finished surface. Designed but not started - see DESIGN.md §5.1, §6.2 and §4.1 for the semantics
+and ROADMAP.md for the breakdown. Phase 3 (CLI) follows it; bot players are designed in
+DESIGN.md §13 and sequenced last.
 
 ## Layout
 
