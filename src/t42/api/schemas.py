@@ -31,6 +31,7 @@ from t42.engine.state import PlayerId, Seat
 from t42.engine.suits import Suit
 from t42.storage.accounts import ContactChannel, Player
 from t42.storage.lobby import GameSummary, Lobby
+from t42.storage.rule_sets import RuleSet
 
 from .errors import invalid_request
 
@@ -135,9 +136,41 @@ class HouseRulesRequest(_Strict):
             raise invalid_request(str(exc)) from exc
 
 
+class RuleSetRequest(_Strict):
+    """A named house-rule set to save, or to replace one with (DESIGN.md §5.1)."""
+
+    name: str = Field(min_length=1, max_length=64)
+    house_rules: HouseRulesRequest = Field(default_factory=HouseRulesRequest)
+
+
+class RuleSetResponse(BaseModel):
+    rule_set_id: str
+    name: str
+    house_rules: dict[str, Any]
+    created_at: str
+
+    @classmethod
+    def of(cls, rule_set: RuleSet) -> RuleSetResponse:
+        return cls(
+            rule_set_id=rule_set.rule_set_id,
+            name=rule_set.name,
+            house_rules=_house_rules_json(rule_set.rules),
+            created_at=rule_set.created_at,
+        )
+
+
+class RuleSetListResponse(BaseModel):
+    rule_sets: list[RuleSetResponse]
+
+
 class CreateGameRequest(_Strict):
+    """Takes either an inline house-rule body or a saved ``rule_set_id``, never both -
+    :func:`t42.api.app._resolve_house_rules` is what tells "not supplied" apart from "supplied as
+    the default", since ``house_rules`` has a ``default_factory``."""
+
     seat: Seat = Seat.NORTH
     house_rules: HouseRulesRequest = Field(default_factory=HouseRulesRequest)
+    rule_set_id: str | None = None
 
 
 class JoinGameRequest(_Strict):

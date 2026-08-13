@@ -102,3 +102,16 @@ class InvalidToken(StorageError):
 
     def __init__(self) -> None:
         super().__init__("the supplied token is not valid")
+
+
+class RuleSetNotFound(StorageError):
+    """No ``RULESET#`` item exists for this id under this player's partition (ROADMAP.md 2.7.1).
+
+    Also raised for a rule set belonging to a different player: it lives under that other
+    player's partition, so from here it is indistinguishable from never having existed, and
+    access control needs no check of its own (DESIGN.md §5.1).
+    """
+
+    def __init__(self, rule_set_id: str) -> None:
+        super().__init__(f"no rule set found with id {rule_set_id!r}")
+        self.rule_set_id = rule_set_id

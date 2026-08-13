@@ -19,6 +19,7 @@ from mypy_boto3_dynamodb.service_resource import Table
 
 from t42.engine.errors import RulesError
 from t42.engine.game import apply_move
+from t42.engine.house_rules import HouseRules
 from t42.engine.moves import Move
 from t42.engine.projection import project
 from t42.engine.state import GameId, PlayerId
@@ -42,9 +43,16 @@ from t42.storage.lobby import (
     new_game_code,
 )
 from t42.storage.repository import GameStatus, append, find_request, get_state
+from t42.storage.rule_sets import (
+    create_rule_set,
+    delete_rule_set,
+    get_rule_set,
+    list_rule_sets,
+    update_rule_set,
+)
 
 from .deps import BearerToken, CurrentPlayer, IdempotencyKey, TableDep
-from .errors import install_error_handlers, not_a_player, not_started
+from .errors import install_error_handlers, invalid_request, not_a_player, not_started
 from .schemas import (
     AuctionRequest,
     CreateGameRequest,
@@ -57,6 +65,9 @@ from .schemas import (
     PlayDominoRequest,
     PlayerResponse,
     RegisterRequest,
+    RuleSetListResponse,
+    RuleSetRequest,
+    RuleSetResponse,
     SignInRequest,
     TokenResponse,
 )
@@ -136,6 +147,44 @@ def my_games(table: TableDep, player_id: CurrentPlayer) -> GameListResponse:
     )
 
 
+# -------------------------------------------------------------------------------------- rule sets
+
+
+@app.post("/players/me/rule-sets", status_code=status.HTTP_201_CREATED)
+def save_rule_set(
+    table: TableDep, player_id: CurrentPlayer, body: RuleSetRequest
+) -> RuleSetResponse:
+    rule_set = create_rule_set(table, player_id, body.name, body.house_rules.to_domain())
+    return RuleSetResponse.of(rule_set)
+
+
+@app.get("/players/me/rule-sets")
+def my_rule_sets(table: TableDep, player_id: CurrentPlayer) -> RuleSetListResponse:
+    return RuleSetListResponse(
+        rule_sets=[RuleSetResponse.of(rs) for rs in list_rule_sets(table, player_id)]
+    )
+
+
+@app.get("/players/me/rule-sets/{rule_set_id}")
+def read_rule_set(table: TableDep, player_id: CurrentPlayer, rule_set_id: str) -> RuleSetResponse:
+    return RuleSetResponse.of(get_rule_set(table, player_id, rule_set_id))
+
+
+@app.put("/players/me/rule-sets/{rule_set_id}")
+def replace_rule_set(
+    table: TableDep, player_id: CurrentPlayer, rule_set_id: str, body: RuleSetRequest
+) -> RuleSetResponse:
+    rule_set = update_rule_set(
+        table, player_id, rule_set_id, body.name, body.house_rules.to_domain()
+    )
+    return RuleSetResponse.of(rule_set)
+
+
+@app.delete("/players/me/rule-sets/{rule_set_id}", status_code=status.HTTP_204_NO_CONTENT)
+def remove_rule_set(table: TableDep, player_id: CurrentPlayer, rule_set_id: str) -> None:
+    delete_rule_set(table, player_id, rule_set_id)
+
+
 # ------------------------------------------------------------------------------ game lifecycle
 
 
@@ -143,7 +192,7 @@ def my_games(table: TableDep, player_id: CurrentPlayer) -> GameListResponse:
 def create_game(table: TableDep, player_id: CurrentPlayer, body: CreateGameRequest) -> GameResponse:
     """Opens a lobby with the caller seated. The returned ``game_id`` is the join code others
     need (DESIGN.md §4.1)."""
-    config = body.house_rules.to_domain()
+    config = _resolve_house_rules(table, player_id, body)
     username = get_player(table, player_id).username
 
     for _ in range(_CODE_ATTEMPTS):
@@ -269,6 +318,20 @@ def _submit(
         if request_id is None or find_request(table, game_id, request_id) is None:
             raise
     return _game_response(table, get_lobby(table, game_id), player_id)
+
+
+def _resolve_house_rules(table: Table, player_id: PlayerId, body: CreateGameRequest) -> HouseRules:
+    """Either a saved set or an inline body, never both (DESIGN.md §5.1).
+
+    ``model_fields_set`` is how "``house_rules`` was sent" is told apart from "``house_rules``
+    defaulted": ``HouseRulesRequest`` has a ``default_factory``, so an absent field and an
+    explicitly-sent default value are otherwise indistinguishable on the model itself.
+    """
+    if body.rule_set_id is not None:
+        if "house_rules" in body.model_fields_set:
+            raise invalid_request("supply either house_rules or rule_set_id, not both")
+        return get_rule_set(table, player_id, body.rule_set_id).rules
+    return body.house_rules.to_domain()
 
 
 def _require_seat(lobby: Lobby, player_id: PlayerId) -> None:
