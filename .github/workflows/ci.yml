@@ -28,3 +28,6 @@ jobs:
 
       - name: Test
         run: uv run pytest
+
+      - name: Integration test
+        run: uv run pytest -m integration

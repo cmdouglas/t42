@@ -33,7 +33,7 @@ plunge/splash doubles-and-marks minimums and the nello/nello_low/sevens mark flo
 of a two-ended tile is the suit led, recorded on `Trick.declared_suit` and read through
 `trick_rules.suit_led` rather than derived.
 
-Phase 1 (persistence) is under way. boto3 landed in 1.3 - see below.
+Phase 1 (persistence) is complete. boto3 landed in 1.3 - see below.
 
 1.1 (item shapes and codec) is complete: `t42.storage.codec` encodes and decodes `GameState`,
 `HouseRules` and every `Event` to the plain dict/list/str/int/bool/None shapes boto3's
@@ -61,7 +61,7 @@ game_id, events, new_state, expected_version)` writes further events and the res
 one transaction, conditioned on `expected_version` still matching what's stored, and also updates
 `META.last_activity_at` and every `PLAYER#` item's turn status. A stale `expected_version` raises
 `VersionConflict` (`t42.storage.errors`, alongside `GameNotFound`/`GameAlreadyExists`) - the
-optimistic-concurrency guarantee 1.6 will exercise concurrently. `version` lives only in
+optimistic-concurrency guarantee 1.6 exercises under real concurrency. `version` lives only in
 `StoredGame`, never on `GameState` itself (invariant 1). Tested against `moto`'s in-memory
 DynamoDB (`tests/storage/conftest.py`'s `table` fixture) rather than DynamoDB Local, which stays
 reserved for 1.6's integration tests per ROADMAP.md; one test drives a full game through
@@ -91,7 +91,22 @@ read-model. Proven in `tests/engine/test_projection.py` by a leakage test that d
 (standard and nello, the latter for its sitting-out partner) through every phase and asserts no
 tile held by another seat ever appears anywhere in the projected structure.
 
-Integration tests against DynamoDB Local (1.6) are next - see ROADMAP.md.
+1.6 (integration tests) is complete, closing out Phase 1. `tests/storage/conftest.py`'s
+`dynamodb_local` fixture starts a real `amazon/dynamodb-local` container via `testcontainers` for
+the whole test session and `real_table` creates/drops a fresh `Texas42` table in it per test - the
+same per-test isolation `table`'s moto fixture gives, just against a long-lived container. Both
+fixtures create their table through the shared `_create_texas42_table` helper, so the schema can't
+drift between the two. These tests are marked `@pytest.mark.integration` and excluded from the
+default `uv run pytest` (`addopts` carries `-m "not integration"`) since they need Docker and are
+slower to start; `uv run pytest -m integration` runs them explicitly, and CI runs both as separate
+steps. `tests/storage/test_repository_integration.py` proves, against real infra rather than
+moto's approximation of it, the two guarantees moto alone couldn't fully establish: genuine
+concurrent `append` calls from a `ThreadPoolExecutor` racing the same `expected_version` never let
+more than one land or produce a mixed state, and a full scripted game persisted move by move
+round-trips through `replay()` exactly as the moto-backed version does. With this, Phase 1's exit
+criteria (ROADMAP.md) are all met.
+
+Phase 2 (API) is next - see ROADMAP.md.
 
 ## Layout
 
@@ -110,8 +125,8 @@ src/t42/engine/     pure rules library (Phase 0 - complete)
     tricks.py       trick legality and resolution, active-seat-aware for nello's 3-handed hands
     game.py         new_game / apply_move / legal_moves entry points
     errors.py       RulesError, IllegalMove, OutOfTurn, UnknownContract
-    projection.py   player-specific view                                   stub (Phase 1)
-src/t42/storage/    DynamoDB event log + materialized state   (Phase 1, in progress)
+    projection.py   project(state, player_id): the hidden-information gate (1.5 - complete)
+src/t42/storage/    DynamoDB event log + materialized state   (Phase 1, complete)
     codec.py        GameState/HouseRules/Event <-> plain attribute maps (1.1 - complete)
     events.py       move/deal -> Event (write direction)                (1.2 - complete)
     replay.py       Event log -> GameState via real new_game/apply_move (1.2 - complete)
@@ -124,8 +139,9 @@ tests/engine/       mirrors the engine modules; test_full_game.py is the Phase 0
                     `on_transition` hooks) are reused by tests/storage/ to generate real games for
                     the codec, replay and repository round-trip tests
 tests/storage/      mirrors src/t42/storage/; conftest.py's `table` fixture is a moto-backed
-                    in-memory DynamoDB table, used by test_repository.py (real DynamoDB Local is
-                    reserved for 1.6's integration tests)
+                    in-memory DynamoDB table, used by test_repository.py; `real_table` is its
+                    integration-test counterpart, a real DynamoDB Local in Docker via
+                    testcontainers, used only by test_repository_integration.py (1.6 - complete)
 ```
 
 ## Commands
@@ -133,14 +149,16 @@ tests/storage/      mirrors src/t42/storage/; conftest.py's `table` fixture is a
 Requires [uv](https://docs.astral.sh/uv/); Python 3.13 is fetched automatically.
 
 ```bash
-uv sync --extra dev     # venv + dev tooling
-uv run pytest           # tests
-uv run mypy             # strict type check over src and tests
-uv run ruff check .     # lint
-uv run ruff format .    # format
+uv sync --extra dev            # venv + dev tooling
+uv run pytest                  # tests (fast; excludes the Docker-backed integration suite)
+uv run pytest -m integration   # integration tests against a real DynamoDB Local (needs Docker)
+uv run mypy                    # strict type check over src and tests
+uv run ruff check .            # lint
+uv run ruff format .           # format
 ```
 
-Run all four before considering a change done; CI runs the same set.
+Run `pytest`, `mypy`, `ruff check` and `ruff format` before considering a change done; CI runs the
+same set, plus the integration suite as its own step.
 
 ## Invariants
 

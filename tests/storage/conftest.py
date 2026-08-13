@@ -1,30 +1,93 @@
-"""Shared moto fixture for repository tests (ROADMAP.md 1.3). ``table`` gives each test its own
-in-memory DynamoDB, so tests never touch a real AWS account or need Docker."""
+"""Shared fixtures for repository tests. ``table`` (ROADMAP.md 1.3) gives each test its own
+in-memory DynamoDB via moto, so most of the suite never touches a real AWS account or needs
+Docker. ``real_table`` (ROADMAP.md 1.6) is its integration-test counterpart, backed by a real
+DynamoDB Local running in Docker via testcontainers - reserved for ``@pytest.mark.integration``
+tests, which prove nothing in the repository secretly depends on moto's approximation of DynamoDB.
+"""
 
 from __future__ import annotations
 
+import time
 from collections.abc import Iterator
 
 import boto3
 import pytest
+from botocore.exceptions import EndpointConnectionError
 from moto import mock_aws
-from mypy_boto3_dynamodb.service_resource import Table
+from mypy_boto3_dynamodb.service_resource import DynamoDBServiceResource, Table
+from testcontainers.core.container import DockerContainer
+
+
+def _create_texas42_table(resource: DynamoDBServiceResource) -> Table:
+    """Shared by ``table`` (moto) and ``real_table`` (DynamoDB Local) so the schema can't drift
+    between the two - written with literal kwargs, not a splatted dict, since boto3-stubs types
+    ``create_table`` as a set of overloads keyed on exactly those keyword names."""
+    resource.create_table(
+        TableName="Texas42",
+        KeySchema=[
+            {"AttributeName": "PK", "KeyType": "HASH"},
+            {"AttributeName": "SK", "KeyType": "RANGE"},
+        ],
+        AttributeDefinitions=[
+            {"AttributeName": "PK", "AttributeType": "S"},
+            {"AttributeName": "SK", "AttributeType": "S"},
+        ],
+        BillingMode="PAY_PER_REQUEST",
+    )
+    return resource.Table("Texas42")
 
 
 @pytest.fixture
 def table() -> Iterator[Table]:
     with mock_aws():
         resource = boto3.resource("dynamodb", region_name="us-east-1")
-        resource.create_table(
-            TableName="Texas42",
-            KeySchema=[
-                {"AttributeName": "PK", "KeyType": "HASH"},
-                {"AttributeName": "SK", "KeyType": "RANGE"},
-            ],
-            AttributeDefinitions=[
-                {"AttributeName": "PK", "AttributeType": "S"},
-                {"AttributeName": "SK", "AttributeType": "S"},
-            ],
-            BillingMode="PAY_PER_REQUEST",
+        yield _create_texas42_table(resource)
+
+
+@pytest.fixture(scope="session")
+def dynamodb_local() -> Iterator[str]:
+    """A real DynamoDB Local instance in Docker, alive for the whole test session. Yields its
+    endpoint URL once it's actually accepting requests - readiness is checked by polling
+    ``list_tables()`` through boto3 itself rather than matching a log line, so it keeps working
+    across image versions."""
+    with DockerContainer("amazon/dynamodb-local:latest").with_exposed_ports(8000) as container:
+        endpoint_url = (
+            f"http://{container.get_container_host_ip()}:{container.get_exposed_port(8000)}"
         )
-        yield resource.Table("Texas42")
+        client = boto3.client(
+            "dynamodb",
+            endpoint_url=endpoint_url,
+            region_name="us-east-1",
+            aws_access_key_id="local",
+            aws_secret_access_key="local",
+        )
+        deadline = time.monotonic() + 30
+        while True:
+            try:
+                client.list_tables()
+                break
+            except EndpointConnectionError:
+                if time.monotonic() > deadline:
+                    raise
+                time.sleep(0.5)
+        yield endpoint_url
+
+
+@pytest.fixture
+def real_table(dynamodb_local: str) -> Iterator[Table]:
+    """A fresh ``Texas42`` table in the real DynamoDB Local instance, created before and dropped
+    after each test - the same per-test isolation the moto ``table`` fixture gives, just against a
+    long-lived container instead of a fresh mock."""
+    resource = boto3.resource(
+        "dynamodb",
+        endpoint_url=dynamodb_local,
+        region_name="us-east-1",
+        aws_access_key_id="local",
+        aws_secret_access_key="local",
+    )
+    table = _create_texas42_table(resource)
+    table.wait_until_exists()
+    try:
+        yield table
+    finally:
+        table.delete()

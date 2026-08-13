@@ -16,6 +16,7 @@ dev = [
     "ruff>=0.8",
     "moto[dynamodb]>=5.0",
     "boto3-stubs[dynamodb]>=1.35",
+    "testcontainers>=4.8",
 ]
 
 [build-system]
@@ -27,7 +28,10 @@ packages = ["src/t42"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "--strict-markers --strict-config"
+addopts = "--strict-markers --strict-config -m \"not integration\""
+markers = [
+    "integration: needs a real DynamoDB Local via Docker (ROADMAP.md 1.6); run with `-m integration`",
+]
 
 [tool.ruff]
 target-version = "py313"
