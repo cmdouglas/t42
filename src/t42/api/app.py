@@ -49,6 +49,7 @@ from t42.storage.lobby import (
     get_lobby,
     join_seat,
     list_games_for_player,
+    list_open_games,
     new_game_code,
 )
 from t42.storage.repository import GameStatus, append, find_request, get_state
@@ -74,6 +75,7 @@ from .schemas import (
     InviteRequest,
     InviteResponse,
     JoinGameRequest,
+    OpenGamesResponse,
     PlayDominoRequest,
     PlayerResponse,
     RegisterRequest,
@@ -96,6 +98,10 @@ install_error_handlers(app)
 #: million, so any number above one is really guarding against a pathological RNG rather than
 #: expected contention.
 _CODE_ATTEMPTS = 5
+
+#: DESIGN.md §6 lists no query parameters for the open-games browse, so this is a fixed cap
+#: rather than a client-tunable one.
+_OPEN_GAMES_LIMIT = 50
 
 
 @app.get("/health")
@@ -233,6 +239,20 @@ def join_game(
     username = get_player(table, player_id).username
     lobby = join_seat(table, game_id, player_id, username, body.seat, rng=Random())
     return _game_response(table, lobby, player_id)
+
+
+@app.get("/games/open")
+def open_games(table: TableDep, player_id: CurrentPlayer) -> OpenGamesResponse:
+    """Public tables still ``WAITING`` with a seat free, newest first (DESIGN.md §4.1, §6.2).
+    Filters out the caller's own tables - free, since the ``OpenGames`` GSI already projected the
+    seats map, so this needs no extra read per row.
+
+    Registered *before* ``/games/{game_id}`` below: Starlette matches routes in registration
+    order, and ``{game_id}`` would otherwise swallow the literal ``open`` path first.
+    """
+    lobbies = list_open_games(table, limit=_OPEN_GAMES_LIMIT)
+    games = [GameResponse.of(lobby, None) for lobby in lobbies if lobby.seat_of(player_id) is None]
+    return OpenGamesResponse(games=games)
 
 
 @app.get("/games/{game_id}")

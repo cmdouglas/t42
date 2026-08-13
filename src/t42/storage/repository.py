@@ -111,7 +111,13 @@ def start_game(
             "Update": {
                 "TableName": table.name,
                 "Key": {"PK": _game_pk(game_id), "SK": "META"},
-                "UpdateExpression": "SET #status = :active, last_activity_at = :ts",
+                # ``REMOVE`` is what drops a public game out of the ``OpenGames`` GSI
+                # (DESIGN.md §4.1): this is the only transition out of ``WAITING``, so it's the
+                # only place that removal is needed. Removing an attribute an invite-only game
+                # never had is a safe no-op.
+                "UpdateExpression": (
+                    "SET #status = :active, last_activity_at = :ts REMOVE GSI1PK, GSI1SK"
+                ),
                 "ConditionExpression": "#status = :waiting",
                 "ExpressionAttributeNames": {"#status": "status"},
                 "ExpressionAttributeValues": {

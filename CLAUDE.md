@@ -139,11 +139,36 @@ Two things worth knowing before touching the API layer:
 Deployment is deliberately not part of Phase 2 - there is a Mangum entry point and nothing
 provisioned. ROADMAP.md carries the open sequencing question about when that changes.
 
-Phase 2.7 (tables: saved house-rule sets, invites, public/invite-only visibility, and an
-open-games browse) is next, ahead of the CLI so its command set is written once against the
-finished surface. Designed but not started - see DESIGN.md §5.1, §6.2 and §4.1 for the semantics
-and ROADMAP.md for the breakdown. Phase 3 (CLI) follows it; bot players are designed in
-DESIGN.md §13 and sequenced last.
+Phase 2.7 (tables) is complete, landing ahead of the CLI so its command set is written once
+against the finished surface rather than grown into it. See DESIGN.md §5.1, §6.2 and §4.1 for the
+semantics and ROADMAP.md for the breakdown; three things are worth knowing before touching this
+surface:
+
+- **A saved rule set is a copy, not a reference** (§5.1). `t42/storage/rule_sets.py` stores named
+  `HouseRules` values under a player's own partition (`RULESET#`); `POST /games` may name one via
+  `rule_set_id`, mutually exclusive with an inline `house_rules` body via `model_fields_set` (an
+  absent field and an explicitly-sent default are otherwise indistinguishable, since
+  `HouseRulesRequest` has a `default_factory`). Editing or deleting a set afterwards never touches
+  a game already created from it - `META.config` already holds the resolved rules independently.
+- **Invites are a permission grant, not a seat reservation** (§6.2). `t42/storage/invites.py` is
+  deliberately dumb - CRUD over a `GAME#/INVITE#` + `PLAYER#/INVITE#` item pair with no dependency
+  on `lobby.py`, which avoids a circular import (`lobby.join_seat` needs `invites.find_invite` to
+  gate an `invite_only` table; validating an invite request needs the `Lobby` that `invites.py`
+  can't import back). `t42/api/app.py`'s invite handler does that validation itself, the same
+  "dumb storage, smart handler" split the "my pending invites" enrichment already uses. `GET
+  /games/{id}` widened from strictly-seated to seated / invited-or-public-`WAITING` / forbidden,
+  which is also what moved `GameResponse.view`'s gate from "game has been dealt" to "caller is
+  seated" - the one thing DESIGN.md §6.2 says changes about invariant 5's gate.
+- **The `OpenGames` GSI is sparse** (§4.1): a `META` item carries `GSI1PK`/`GSI1SK` only while
+  public and `WAITING`, written by `create_pending_game` and removed by `start_game`'s conditional
+  update - the only transition out of `WAITING`, so there is exactly one removal site. A GSI is
+  eventually consistent, unlike moto, so `tests/storage/test_lobby_integration.py` polls against
+  real DynamoDB Local rather than asserting immediately; that file is the one place this project
+  currently exercises that gap. `GET /games/open` is registered before `GET /games/{game_id}` in
+  `api/app.py` on purpose - Starlette matches routes in registration order, and the path parameter
+  would otherwise swallow the literal `open` segment.
+
+Phase 3 (CLI) is next; bot players are designed in DESIGN.md §13 and sequenced last.
 
 ## Layout
 
@@ -163,17 +188,20 @@ src/t42/engine/     pure rules library (Phase 0 - complete)
     game.py         new_game / apply_move / legal_moves entry points
     errors.py       RulesError, IllegalMove, OutOfTurn, UnknownContract
     projection.py   project(state, player_id): the hidden-information gate (1.5 - complete)
-src/t42/storage/    DynamoDB event log + materialized state   (Phases 1 and 2, complete)
+src/t42/storage/    DynamoDB event log + materialized state   (Phases 1, 2 and 2.7, complete)
     _dynamo.py      shared boto3 plumbing: transact_write, Decimal and str narrowing
     codec.py        GameState/HouseRules/Event <-> plain attribute maps (1.1)
     events.py       move/deal -> Event (write direction)                (1.2)
     replay.py       Event log -> GameState via real new_game/apply_move (1.2)
     repository.py   start_game/get_state/append/find_request, GameStatus (1.3, 1.4, 2.2)
-    lobby.py        create_pending_game/join_seat/list_games_for_player  (2.2)
-    accounts.py     players, passwords, per-device bearer tokens         (2.1)
+    lobby.py        create_pending_game/join_seat/list_games_for_player/
+                     list_open_games, Visibility                  (2.2, 2.7.2, 2.7.3)
+    accounts.py     players, passwords, per-device bearer tokens         (2.1, 2.7.2)
+    rule_sets.py    named HouseRules saved under a player's own partition (2.7.1)
+    invites.py      GAME#/INVITE# + PLAYER#/INVITE# permission-grant CRUD (2.7.2)
     errors.py       GameNotFound, VersionConflict, SeatTaken, InvalidToken, ...
-src/t42/api/        FastAPI app behind Mangum                 (Phase 2, complete)
-    app.py          the eleven endpoints; `_submit` is the one write path for moves (2.4)
+src/t42/api/        FastAPI app behind Mangum                 (Phases 2 and 2.7, complete)
+    app.py          the twenty-one endpoints; `_submit` is the one write path for moves (2.4)
     deps.py         table handle and the bearer-token dependency, both overridable (2.4)
     schemas.py      pydantic request/response bodies; the bid body is discriminated (2.3)
     errors.py       domain exception -> status code + machine-readable code          (2.3)

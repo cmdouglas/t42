@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
+from datetime import UTC, datetime
 from random import Random
 
 import pytest
@@ -21,10 +23,12 @@ from t42.storage.errors import (
 )
 from t42.storage.events import events_for_move
 from t42.storage.lobby import (
+    Visibility,
     create_pending_game,
     get_lobby,
     join_seat,
     list_games_for_player,
+    list_open_games,
     new_game_code,
 )
 from t42.storage.repository import GameStatus, append, get_state, start_game
@@ -35,8 +39,28 @@ from ._helpers import started_game
 _OTHERS = {Seat.EAST: "east", Seat.SOUTH: "south", Seat.WEST: "west"}
 
 
-def _open_lobby(table: Table, game_id: str = "g1", config: HouseRules | None = None) -> None:
-    create_pending_game(table, game_id, "north", "north", Seat.NORTH, config or HouseRules())
+def _utcnow() -> datetime:
+    return datetime.now(UTC)
+
+
+def _open_lobby(
+    table: Table,
+    game_id: str = "g1",
+    config: HouseRules | None = None,
+    *,
+    visibility: Visibility = Visibility.PUBLIC,
+    now: Callable[[], datetime] = _utcnow,
+) -> None:
+    create_pending_game(
+        table,
+        game_id,
+        "north",
+        "north",
+        Seat.NORTH,
+        config or HouseRules(),
+        visibility=visibility,
+        now=now,
+    )
 
 
 def _fill(table: Table, game_id: str = "g1", *, seed: int = 0) -> None:
@@ -240,3 +264,30 @@ def test_game_codes_avoid_confusable_characters(table: Table) -> None:
     assert all(len(code) == 6 for code in codes)
     assert not set("".join(codes)) & set("ILOU01")
     assert len(codes) > 190  # not a constant, and not obviously clustered
+
+
+def test_list_open_games_is_newest_first(table: Table) -> None:
+    _open_lobby(table, "g1", now=lambda: datetime(2025, 1, 1, tzinfo=UTC))
+    _open_lobby(table, "g2", now=lambda: datetime(2030, 1, 1, tzinfo=UTC))
+
+    games = [lobby.game_id for lobby in list_open_games(table)]
+
+    assert games == ["g2", "g1"]
+
+
+def test_list_open_games_excludes_invite_only(table: Table) -> None:
+    _open_lobby(table, "g1", visibility=Visibility.PUBLIC)
+    _open_lobby(table, "g2", visibility=Visibility.INVITE_ONLY)
+
+    games = [lobby.game_id for lobby in list_open_games(table)]
+
+    assert games == ["g1"]
+
+
+def test_list_open_games_drops_a_game_once_dealt(table: Table) -> None:
+    _open_lobby(table)
+    assert [lobby.game_id for lobby in list_open_games(table)] == ["g1"]
+
+    _fill(table)
+
+    assert list_open_games(table) == ()

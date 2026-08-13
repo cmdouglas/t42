@@ -314,6 +314,13 @@ class InviteListResponse(BaseModel):
     games: list[GameResponse]
 
 
+class OpenGamesResponse(BaseModel):
+    """The public-tables browse (DESIGN.md §6, §4.1). Same reuse as ``InviteListResponse``: every
+    row is a public ``WAITING`` lobby, so ``view`` is always ``None``."""
+
+    games: list[GameResponse]
+
+
 def _house_rules_json(rules: HouseRules) -> dict[str, Any]:
     """The rule set as plain data for a client. Not shared with
     :func:`t42.storage.codec.encode_house_rules`, for the same reason ``projection`` keeps its own

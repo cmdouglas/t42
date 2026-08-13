@@ -180,20 +180,24 @@ def create_pending_game(
     timestamp = now().isoformat()
     seats = {seat: SeatAssignment(player_id=creator, username=username)}
 
+    item: dict[str, Any] = {
+        "PK": _game_pk(game_id),
+        "SK": "META",
+        "status": GameStatus.WAITING.value,
+        "visibility": visibility.value,
+        "seats": _encode_seats(seats),
+        "config": encode_house_rules(config),
+        "created_at": timestamp,
+        "last_activity_at": timestamp,
+    }
+    if visibility is Visibility.PUBLIC:
+        # The ``OpenGames`` GSI (DESIGN.md §4.1): sparse, so only a public game ever carries
+        # these, and ``start_game`` removes them the moment the game leaves ``WAITING``.
+        item["GSI1PK"] = "OPEN"
+        item["GSI1SK"] = timestamp
+
     try:
-        table.put_item(
-            Item={
-                "PK": _game_pk(game_id),
-                "SK": "META",
-                "status": GameStatus.WAITING.value,
-                "visibility": visibility.value,
-                "seats": _encode_seats(seats),
-                "config": encode_house_rules(config),
-                "created_at": timestamp,
-                "last_activity_at": timestamp,
-            },
-            ConditionExpression="attribute_not_exists(PK)",
-        )
+        table.put_item(Item=item, ConditionExpression="attribute_not_exists(PK)")
     except ClientError as exc:
         if exc.response["Error"]["Code"] == "ConditionalCheckFailedException":
             raise GameAlreadyExists(game_id) from exc
@@ -231,9 +235,17 @@ def get_lobby(table: Table, game_id: GameId) -> Lobby:
     item = table.get_item(Key={"PK": _game_pk(game_id), "SK": "META"}).get("Item")
     if item is None:
         raise GameNotFound(game_id)
+    return _lobby_from_item(item)
+
+
+def _lobby_from_item(item: Mapping[str, Any]) -> Lobby:
+    """Decodes a ``META`` item into a ``Lobby``. Takes the raw item rather than a ``game_id``
+    argument so it works equally for a direct ``get_item`` and for a hit off the ``OpenGames``
+    GSI, which carries every attribute (``Projection: ALL``) but no key the caller already holds -
+    the game id has to come from the item's own ``PK``."""
     normalized = from_dynamo(item)
     return Lobby(
-        game_id=game_id,
+        game_id=as_text(normalized["PK"]).removeprefix("GAME#"),
         status=GameStatus(normalized["status"]),
         visibility=Visibility(normalized["visibility"]),
         config=decode_house_rules(normalized["config"]),
@@ -241,6 +253,23 @@ def get_lobby(table: Table, game_id: GameId) -> Lobby:
         created_at=as_text(normalized["created_at"]),
         last_activity_at=as_text(normalized["last_activity_at"]),
     )
+
+
+def list_open_games(table: Table, *, limit: int = 50) -> tuple[Lobby, ...]:
+    """Public tables still ``WAITING``, newest first (DESIGN.md §4.1, ROADMAP.md 2.7.3).
+
+    One query on the sparse ``OpenGames`` GSI - an invite-only game, or one that's left
+    ``WAITING``, was never indexed in the first place, so there is nothing to filter here.
+    Newest-first falls out of ``GSI1SK`` being an ISO-8601 timestamp, descending.
+    """
+    response = table.query(
+        IndexName="OpenGames",
+        KeyConditionExpression="GSI1PK = :open",
+        ExpressionAttributeValues={":open": "OPEN"},
+        ScanIndexForward=False,
+        Limit=limit,
+    )
+    return tuple(_lobby_from_item(item) for item in response.get("Items", ()))
 
 
 def join_seat(
