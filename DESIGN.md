@@ -54,6 +54,7 @@ Table: `Texas42` (single-table design)
 | `GAME#<gameId>` | `EVENT#<seq>` | One immutable event: bid, pass, trump declaration, domino play |
 | `GAME#<gameId>` | `STATE` | Materialized current full state (server-side only — includes all hands), plus `version` for optimistic locking |
 | `PLAYER#<playerId>` | `GAME#<gameId>` | Lookup: which games a player is in, and their seat/turn status (for "my games" queries and notification targeting) |
+| `GAME#<gameId>` | `REQUEST#<requestId>` | Idempotency marker for a mutating request, storing the version it produced - a duplicate submission with the same client-generated request ID is a no-op returning the recorded version (section 9) |
 
 Event example:
 ```json

@@ -81,6 +81,53 @@ def test_append_rejects_a_stale_expected_version(table: Table) -> None:
     assert get_state(table, "g1").version == 2
 
 
+def test_append_with_a_repeated_request_id_is_a_no_op(table: Table) -> None:
+    state = _create(table, "g1")
+    seat = state.to_act
+    assert seat is not None
+    move = legal_moves(state, PLAYERS[seat])[0]
+    new_state = apply_move(state, move, rng=Random(1))
+    events = events_for_move(state, move, new_state)
+
+    first_version = append(table, "g1", events, new_state, expected_version=1, request_id="r1")
+
+    # A real retry resends the same expected_version, now stale - the request_id match must win.
+    second_version = append(table, "g1", events, new_state, expected_version=1, request_id="r1")
+
+    assert second_version == first_version == 2
+    stored = get_state(table, "g1")
+    assert stored.version == 2
+    assert stored.state == new_state
+
+
+def test_append_with_a_different_request_id_still_rejects_a_stale_version(table: Table) -> None:
+    state = _create(table, "g1")
+    seat = state.to_act
+    assert seat is not None
+    move = legal_moves(state, PLAYERS[seat])[0]
+    new_state = apply_move(state, move, rng=Random(1))
+    events = events_for_move(state, move, new_state)
+
+    append(table, "g1", events, new_state, expected_version=1, request_id="r1")
+
+    with pytest.raises(VersionConflict):
+        append(table, "g1", events, new_state, expected_version=1, request_id="r2")
+
+
+def test_append_records_a_request_id_marker_item(table: Table) -> None:
+    state = _create(table, "g1")
+    seat = state.to_act
+    assert seat is not None
+    move = legal_moves(state, PLAYERS[seat])[0]
+    new_state = apply_move(state, move, rng=Random(1))
+    events = events_for_move(state, move, new_state)
+
+    new_version = append(table, "g1", events, new_state, expected_version=1, request_id="r1")
+
+    item = table.get_item(Key={"PK": "GAME#g1", "SK": "REQUEST#r1"})["Item"]
+    assert item["new_version"] == new_version == 2
+
+
 def test_append_updates_player_turn_status(table: Table) -> None:
     state = _create(table, "g1")
     seat = state.to_act

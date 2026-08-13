@@ -1,5 +1,6 @@
 """Durable game state in DynamoDB (ROADMAP.md 1.3), per DESIGN.md §4.1's single-table shape:
-``META``, ``EVENT#<seq>``, ``STATE`` and ``PLAYER#`` items under one partition per game.
+``META``, ``EVENT#<seq>``, ``STATE``, ``PLAYER#`` and ``REQUEST#<requestId>`` items under one
+partition per game.
 
 Functions here take a boto3 ``Table`` resource as an explicit parameter rather than owning a
 connection themselves - the same injected-dependency style as ``rng: Random`` throughout the
@@ -58,6 +59,10 @@ def _game_sk(game_id: GameId) -> str:
 
 def _event_sk(seq: int) -> str:
     return f"EVENT#{seq:06d}"
+
+
+def _request_sk(request_id: str) -> str:
+    return f"REQUEST#{request_id}"
 
 
 def _transact_write(table: Table, items: list[dict[str, Any]]) -> None:
@@ -192,13 +197,21 @@ def append(
     new_state: GameState,
     expected_version: int,
     *,
+    request_id: str | None = None,
     now: Callable[[], datetime] = _utcnow,
 ) -> int:
     """Writes ``events`` and the resulting ``new_state`` in one transaction, conditioned on
     ``expected_version`` still matching what's stored - the write optimistic concurrency depends
     on. Also updates ``META.last_activity_at`` (DESIGN.md §9) and every ``PLAYER#`` item's turn
     status. Raises ``VersionConflict`` if the transaction is cancelled; returns the new version on
-    success."""
+    success.
+
+    ``request_id``, when given, makes this call idempotent (ROADMAP.md 1.4, DESIGN.md §6/§9): a
+    ``REQUEST#<requestId>`` marker recording the resulting version is written in the same
+    transaction, conditioned on its own absence. A duplicate call with the same ``request_id`` -
+    even with a now-stale ``expected_version``, as a real client retry would send - finds that
+    marker already present, and returns its recorded version as a no-op rather than raising
+    ``VersionConflict`` or applying ``events`` twice."""
     timestamp = now().isoformat()
     new_version = expected_version + len(events)
 
@@ -255,11 +268,31 @@ def append(
         }
         for seat, player_id in new_state.players.items()
     )
+    if request_id is not None:
+        transact_items.append(
+            {
+                "Put": {
+                    "TableName": table.name,
+                    "Item": {
+                        "PK": _game_pk(game_id),
+                        "SK": _request_sk(request_id),
+                        "new_version": new_version,
+                    },
+                    "ConditionExpression": "attribute_not_exists(SK)",
+                }
+            }
+        )
 
     try:
         _transact_write(table, transact_items)
     except ClientError as exc:
         if exc.response["Error"]["Code"] == "TransactionCanceledException":
+            if request_id is not None:
+                existing = table.get_item(
+                    Key={"PK": _game_pk(game_id), "SK": _request_sk(request_id)}
+                ).get("Item")
+                if existing is not None:
+                    return cast(int, _from_dynamo(existing)["new_version"])
             raise VersionConflict(game_id, expected_version) from exc
         raise
     return new_version

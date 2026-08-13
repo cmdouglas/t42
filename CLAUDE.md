@@ -69,7 +69,18 @@ reserved for 1.6's integration tests per ROADMAP.md; one test drives a full game
 `create_game`/`append` and confirms `t42.storage.replay.replay` over the resulting event log
 reproduces the same `STATE` item, tying 1.2 and 1.3 together.
 
-Idempotency (1.4) is next - see ROADMAP.md.
+1.4 (idempotency) is complete: `append` takes an optional keyword-only `request_id`; when given, the
+same transaction that writes the events and updates `STATE`/`META`/`PLAYER#` also `Put`s a
+`REQUEST#<requestId>` marker recording the resulting version, conditioned on its own absence. A
+duplicate call with the same `request_id` - including one carrying a now-stale `expected_version`,
+as a real client retry would - finds that marker already written and returns its recorded version
+as a no-op instead of raising `VersionConflict` or applying `events` twice; `request_id=None`
+(the default) leaves `append`'s behavior unchanged from 1.3. `create_game` needs no equivalent,
+since `game_id` is already its idempotency key (`GameAlreadyExists` on a repeat). Engine `Move`/
+`Event` types, `apply_move` and `t42.storage.replay` stay untouched - idempotency is a repository
+concern only (invariant 1).
+
+Player-specific view (1.5) is next - see ROADMAP.md.
 
 ## Layout
 
