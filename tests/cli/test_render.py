@@ -1,10 +1,18 @@
 from __future__ import annotations
 
+import re
+from random import Random
 from typing import Any
 
 import pytest
 
 from t42.cli import render
+from t42.engine.game import new_game
+from t42.engine.house_rules import HouseRules
+from t42.engine.projection import project
+from t42.engine.state import GameState, Seat
+
+from ..engine._helpers import PLAYERS, drive_to_game_over, player_of, prefer_contract
 
 # --- seat / suit name tables -------------------------------------------------
 
@@ -195,6 +203,27 @@ def test_seated_marks_the_callers_own_seat() -> None:
     assert "south: carol (you)" in result
     assert "north: alice" in result
     assert "alice (you)" not in result
+
+
+def test_game_over_view_with_no_current_hand_does_not_crash() -> None:
+    """Every response to the move that ends a game looks like this: ``phase`` flips to
+    ``GAME_OVER`` and ``hand``/``current_trick``/``dealer``/``declarer``/``contract``/``trump``/
+    ``to_act`` all go back to ``None`` (``t42.engine.projection.project`` has no hand left to read
+    them from) - a real, reachable shape every completed game hits, not an edge case."""
+    view = _view(
+        phase="GAME_OVER",
+        dealer=None,
+        to_act=None,
+        declarer=None,
+        contract=None,
+        trump=None,
+        hand=None,
+        current_trick=None,
+        completed_tricks=[],
+        legal_moves=[],
+    )
+    result = render.render_game(_seated_game(view))
+    assert "phase: GAME_OVER" in result
 
 
 def test_bidding_phase_renders_legal_bids_as_commands() -> None:
@@ -433,3 +462,45 @@ def test_profile_empty_contacts_and_devices() -> None:
     result = render.render_profile(player)
     assert "contacts: (none)" in result
     assert "devices: (none)" in result
+
+
+# --- the third leakage proof (ROADMAP.md 3.7) -----------------------------------------------
+#
+# 1.5 proved project() doesn't leak another seat's tiles; 2.5 proved the wire doesn't either. This
+# proves the same of what render_game actually prints - the only one a player looks at.
+
+_CONFIG = HouseRules(
+    enabled_contracts=frozenset({"standard", "nello", "plunge", "sevens"}), marks_to_win=1
+)
+_TILE_RE = re.compile(r"(?<!\d)[0-6]-[0-6](?!\d)")
+
+
+def _hidden_tiles(state: GameState, seat: Seat) -> set[str]:
+    hand = state.hand
+    assert hand is not None
+    return {
+        str(domino)
+        for other_seat, tiles in hand.hands.items()
+        if other_seat != seat
+        for domino in tiles
+    }
+
+
+@pytest.mark.parametrize("contract_name", ["standard", "nello"])
+def test_no_foreign_tile_ever_appears_in_rendered_output(contract_name: str) -> None:
+    rng = Random(1)
+    state = new_game(f"g-{contract_name}", PLAYERS, _CONFIG, rng=rng)
+    snapshots = [state]
+    drive_to_game_over(
+        state, prefer_contract(contract_name), rng, on_state=snapshots.append, max_moves=200
+    )
+
+    for snapshot in snapshots:
+        if snapshot.hand is None:
+            continue
+        for seat in Seat:
+            hidden = _hidden_tiles(snapshot, seat)
+            view = project(snapshot, player_of(seat))
+            rendered = render.render_game(_seated_game(view))
+            leaked = hidden & set(_TILE_RE.findall(rendered))
+            assert not leaked, f"{contract_name}, seat {seat}: leaked {leaked}"
