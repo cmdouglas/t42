@@ -65,6 +65,17 @@ class PendingInvite:
     created_at: str
 
 
+@dataclass(frozen=True, slots=True)
+class InvitedPlayer:
+    """One row of "who is invited to this table" - unlike :class:`PendingInvite`, this is already
+    a complete row: the ``GAME#/INVITE#`` item carries ``username`` alongside ``player_id``, so no
+    handler-side enrichment is needed to render it."""
+
+    player_id: PlayerId
+    username: str
+    created_at: str
+
+
 def invite_player(
     table: Table,
     game_id: GameId,
@@ -133,6 +144,26 @@ def _pending_invite_from_item(item: dict[str, Any]) -> PendingInvite:
     normalized = from_dynamo(item)
     return PendingInvite(
         game_id=as_text(normalized["game_id"]), created_at=as_text(normalized["created_at"])
+    )
+
+
+def list_invites_for_game(table: Table, game_id: GameId) -> tuple[InvitedPlayer, ...]:
+    """Everyone currently invited to ``game_id``, newest first - the host-side counterpart to
+    ``list_invites_for_player`` (DESIGN.md §6.2)."""
+    response = table.query(
+        KeyConditionExpression="PK = :pk AND begins_with(SK, :prefix)",
+        ExpressionAttributeValues={":pk": _game_pk(game_id), ":prefix": "INVITE#"},
+    )
+    invites = [_invited_player_from_item(item) for item in response.get("Items", ())]
+    return tuple(sorted(invites, key=lambda i: i.created_at, reverse=True))
+
+
+def _invited_player_from_item(item: dict[str, Any]) -> InvitedPlayer:
+    normalized = from_dynamo(item)
+    return InvitedPlayer(
+        player_id=as_text(normalized["player_id"]),
+        username=as_text(normalized["username"]),
+        created_at=as_text(normalized["created_at"]),
     )
 
 

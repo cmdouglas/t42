@@ -41,7 +41,13 @@ from t42.storage.errors import (
     VersionConflict,
 )
 from t42.storage.events import events_for_move
-from t42.storage.invites import find_invite, invite_player, list_invites_for_player, revoke_invite
+from t42.storage.invites import (
+    find_invite,
+    invite_player,
+    list_invites_for_game,
+    list_invites_for_player,
+    revoke_invite,
+)
 from t42.storage.lobby import (
     Lobby,
     Visibility,
@@ -68,9 +74,11 @@ from .schemas import (
     CreateGameRequest,
     DeclareContractRequest,
     DeviceResponse,
+    GameInvitesResponse,
     GameListResponse,
     GameResponse,
     GameSummaryResponse,
+    InvitedPlayerResponse,
     InviteListResponse,
     InviteRequest,
     InviteResponse,
@@ -289,6 +297,20 @@ def create_invite(
         raise AlreadySeated(game_id, seat.value)
     invite_player(table, game_id, invitee_id, body.username)
     return InviteResponse(game_id=game_id, player_id=invitee_id, username=body.username)
+
+
+@app.get("/games/{game_id}/invites")
+def game_invites(table: TableDep, player_id: CurrentPlayer, game_id: GameId) -> GameInvitesResponse:
+    """Who is currently invited to this table - the host-side counterpart to
+    ``GET /players/me/invites`` (DESIGN.md §6.2). Seated players only, the same gate
+    ``POST .../invites`` already applies."""
+    lobby = get_lobby(table, game_id)
+    _require_seat(lobby, player_id)
+    invites = [
+        InvitedPlayerResponse(player_id=i.player_id, username=i.username, created_at=i.created_at)
+        for i in list_invites_for_game(table, game_id)
+    ]
+    return GameInvitesResponse(invites=invites)
 
 
 @app.delete("/games/{game_id}/invites/{target_player_id}", status_code=status.HTTP_204_NO_CONTENT)
