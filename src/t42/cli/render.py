@@ -235,6 +235,13 @@ def render_rule_set_list(response: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def render_token(response: dict[str, Any]) -> str:
+    """A ``TokenResponse`` from ``register``/``login`` - the token itself is deliberately not
+    printed, since it is already saved to the profile file and printing it would just be another
+    way for it to end up in a terminal scrollback or a script's captured output."""
+    return f"signed in as {response['username']} ({response['player_id']})"
+
+
 def render_profile(player: dict[str, Any]) -> str:
     lines = [
         f"{player['username']} ({player['player_id']})",

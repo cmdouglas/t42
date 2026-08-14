@@ -12,8 +12,10 @@ included - declaring the same flags on every subparser so they could also appear
 subcommand would let an unset subparser default silently clobber a value already given before it.
 One declaration site avoids that.
 
-``_COMMANDS`` is empty in this phase: no command exists yet that doesn't need the HTTP client
-ROADMAP.md 3.2 builds next. It is the table ROADMAP.md 3.4 and 3.5 append real commands to.
+``_COMMANDS`` is assembled from ``t42.cli.commands.COMMANDS`` (ROADMAP.md 3.4, 3.5) - the
+``Command`` shape itself lives in ``command.py`` rather than here, so that package can build
+``Command`` values without importing this module (which is what assembles them into the dispatch
+table below).
 """
 
 from __future__ import annotations
@@ -22,12 +24,13 @@ import argparse
 import json as jsonlib
 import os
 import sys
-from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from collections.abc import Sequence
 from typing import NoReturn
 
 from t42.cli import config, errors
 from t42.cli.api import ApiError
+from t42.cli.command import Command as Command
+from t42.cli.commands import COMMANDS as _REAL_COMMANDS
 
 
 class _ExitSignal(Exception):
@@ -45,15 +48,7 @@ class _ArgumentParser(argparse.ArgumentParser):
         raise _ExitSignal(status)
 
 
-@dataclass(frozen=True, slots=True)
-class Command:
-    name: str
-    help: str
-    configure: Callable[[argparse.ArgumentParser], None]
-    handler: Callable[[argparse.Namespace], int]
-
-
-_COMMANDS: tuple[Command, ...] = ()
+_COMMANDS: tuple[Command, ...] = _REAL_COMMANDS
 
 
 def build_parser(commands: Sequence[Command] = _COMMANDS) -> _ArgumentParser:
