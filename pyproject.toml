@@ -10,6 +10,9 @@ dependencies = [
     "mangum>=0.21.0",
 ]
 
+[project.scripts]
+t42 = "t42.cli.main:main"
+
 [project.optional-dependencies]
 dev = [
     "pytest>=8.3",
