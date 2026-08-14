@@ -168,7 +168,35 @@ surface:
   `api/app.py` on purpose - Starlette matches routes in registration order, and the path parameter
   would otherwise swallow the literal `open` segment.
 
-Phase 3 (CLI) is next; bot players are designed in DESIGN.md §13 and sequenced last.
+Phase 3 (CLI) is underway; bot players are designed in DESIGN.md §13 and sequenced last. 3.0
+through 3.3 are complete:
+
+- **3.0** closed the gap the CLI's command set surfaces before any CLI code exists: an invite's
+  player id is handed back once, in a response no client keeps, so `t42 uninvite` had nothing to
+  address a revocation to. `invites.list_invites_for_game` plus `GET /games/{game_id}/invites`
+  (seated callers only) fix that, giving `t42 invited`/`t42 uninvite` a finished surface.
+- **3.1 (skeleton, profiles, credentials)** is complete: `src/t42/cli/main.py`'s `main(argv) -> int`
+  returns an exit code for every expected failure rather than raising, so a command is a plain
+  function a test can call; `_COMMANDS` starts empty, the table 3.4/3.5 append real commands to.
+  `config.py` holds `~/.config/t42/config.json` (honouring `XDG_CONFIG_HOME`), written `0600`
+  through a temp-file-and-rename, keyed by named **profiles** rather than one credential - a
+  four-handed game needs four accounts, and the phase's own dogfood milestone is one person driving
+  all four from one machine.
+- **3.2 (HTTP client and exit codes)** is complete: `api.py`'s `ApiClient` decodes the
+  `{"error": {"code","message"}}` envelope into a typed `ApiError` carrying `code`, which
+  `errors.py`'s `exit_code_for` maps to the DESIGN.md §7.2 table - an unrecognised code exits 1
+  rather than crashing. `ApiClient` is reached through a narrow `Transport` protocol rather than a
+  concrete HTTP library, purely because `fastapi.testclient.TestClient` is built on httpx 0.28 while
+  the CLI's own runtime dependency (the new `cli` optional extra) is httpx2; without that seam 3.7
+  couldn't drive the CLI against the real app in-process.
+- **3.3 (rendering)** is complete: `render.py` is pure `dict -> str` - no HTTP, no `argparse`, and
+  (like every module under `t42.cli`) no import from `t42.engine`, `t42.storage` or boto3. It
+  therefore keeps its own seat- and suit-name tables rather than importing `Seat`/`Suit`, the
+  duplication DESIGN.md §7 explicitly trades for `t42.cli` being provably just a client. Its most
+  load-bearing piece is `render_legal_moves`: it renders each entry of `view["legal_moves"]` as the
+  literal `t42 ...` command that would submit it, which is formatting the server's own answer, not
+  deriving anything - the same "client never decides" rule 3.1-3.2 already followed for turn order
+  and legality.
 
 ## Layout
 
