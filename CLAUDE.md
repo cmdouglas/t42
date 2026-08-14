@@ -168,8 +168,8 @@ surface:
   `api/app.py` on purpose - Starlette matches routes in registration order, and the path parameter
   would otherwise swallow the literal `open` segment.
 
-Phase 3 (CLI) is underway; bot players are designed in DESIGN.md §13 and sequenced last, as Phase
-6. 3.0 through 3.6 are complete, leaving only 3.7 (tests) to close out the phase:
+Phase 3 (CLI) is complete; bot players are designed in DESIGN.md §13 and sequenced last, as Phase
+6:
 
 - **3.0** closed the gap the CLI's command set surfaces before any CLI code exists: an invite's
   player id is handed back once, in a response no client keeps, so `t42 uninvite` had nothing to
@@ -226,6 +226,26 @@ Phase 3 (CLI) is underway; bot players are designed in DESIGN.md §13 and sequen
   point too, in place of an inline snippet that had drifted out of sync with the real schema and
   was missing the `OpenGames` GSI. It lives under `t42.storage`, not a `t42 dev` subcommand,
   because `t42.cli` may not import boto3 - the layering rule 3.7 checks by test.
+- **3.7 (tests)** is complete, closing out Phase 3. `tests/cli/test_render.py` gained **the third
+  leakage proof**: real games driven through the engine, every seat's `project()` view rendered,
+  and no other seat's tile notation ever found in the text (1.5 proved this of `project()`, 2.5 of
+  the wire, this of the screen - the only one a player actually looks at).
+  `tests/cli/test_layering.py` is a static, `ast`-based check that no module under `t42.cli`
+  imports `t42.engine`, `t42.storage` or boto3 - the claim three module docstrings already made,
+  now enforced. `tests/cli/test_commands.py` drives `main(argv)` end to end against the real app
+  in-process through `fastapi.testclient.TestClient` - the seam 3.2 built `Transport`/
+  `transport_factory` for, since `TestClient` subclasses `httpx` 0.28's `Client` while the CLI's
+  own runtime dependency is the separate `httpx2` package - with the moto `table` injected through
+  `app.dependency_overrides`: one scripted walkthrough exercises every command's happy path, and
+  one further test per DESIGN.md §7.2 exit-code bucket earns that exit code through a real command
+  rather than a synthetic one. `tests/cli/test_cli_integration.py` (`@pytest.mark.integration`) is
+  the dogfood milestone itself: four profiles register, seat and play a full game to `GAME_OVER`
+  purely through CLI commands against real DynamoDB Local. `tests/cli/conftest.py` is new too,
+  holding the `cli_app_client` fixture (`TestClient(app)` + the moto override) and the
+  `_config_home` autouse fixture, promoted out of four files that had each hand-rolled an
+  identical copy. Driving a real game to completion this way surfaced a genuine bug along the way:
+  `render.py`'s `_render_trick` assumed `current_trick` was never `None`, but every response to
+  the move that ends a game has exactly that shape - fixed, with a regression test.
 
 ## Layout
 
@@ -264,7 +284,7 @@ src/t42/api/        FastAPI app behind Mangum                 (Phases 2 and 2.7,
     schemas.py      pydantic request/response bodies; the bid body is discriminated (2.3)
     errors.py       domain exception -> status code + machine-readable code          (2.3)
     lambda_handler.py  `Mangum(app)`, nothing else                                   (2.6)
-src/t42/cli/        thin command-line client                  (Phase 3, 3.0-3.6 complete)
+src/t42/cli/        thin command-line client                  (Phase 3, complete)
     main.py         argparse + dispatch; `main(argv) -> int` returns rather than raises (3.1)
     config.py       ~/.config/t42/config.json, named profiles, 0600 (3.1)
     api.py          ApiClient/Transport/HttpTransport, the `{"error": ...}` envelope (3.2)
@@ -285,12 +305,15 @@ tests/storage/      mirrors src/t42/storage/; _helpers.py's `started_game` reach
 tests/api/          contract tests over FastAPI's in-process TestClient, with `table` injected
                     via `app.dependency_overrides`; _helpers.py's `Client`/`play_until` drive a
                     whole game over HTTP, and every test goes through the public API only
-tests/cli/          mirrors src/t42/cli/; _helpers.py's `FakeTransport` fakes `t42.cli.api.Transport`
-                    with no network, letting test_commands_*.py exercise main(argv) end to end;
-                    test_render.py and test_main.py round out 3.1-3.6 - 3.7 still owes pointing
-                    `context.transport_factory` at `TestClient(app)` in-process, a test_layering.py
-                    (no `t42.engine`/`t42.storage`/boto3 import under `t42.cli`), and the
-                    Docker-backed tests/cli/test_cli_integration.py four-profile smoke test
+tests/cli/          mirrors src/t42/cli/; conftest.py's `cli_app_client` (`TestClient(app)` + the
+                    moto `table` override) and `_config_home` are shared by every file here.
+                    _helpers.py's `FakeTransport` fakes `t42.cli.api.Transport` with no network,
+                    letting the per-command test_commands_*.py files exercise handlers directly;
+                    `run_json`/`whose_turn_via_cli`/`play_full_game_via_cli` instead point
+                    `context.transport_factory` at a real `TestClient`, letting test_commands.py
+                    and the Docker-backed test_cli_integration.py drive `main(argv)` against the
+                    real app. test_render.py's leakage proof, test_layering.py and test_main.py
+                    round out the suite (3.7)
 ```
 
 ## Commands
