@@ -57,12 +57,14 @@ Table: `Texas42` (single-table design)
 | `GAME#<gameId>` | `META` | Game metadata: seats (each with player id and username), `status` of `WAITING`/`ACTIVE`/`COMPLETE`, `visibility` of `public`/`invite_only` (section 6.2), created_at, last_activity_at, and the game's house rules (enabled contracts, per-contract options, doubles-as-own-suit flag, marks-to-win, default 7 - see section 5.1) |
 | `GAME#<gameId>` | `EVENT#<seq>` | One immutable event: bid, pass, trump declaration, domino play |
 | `GAME#<gameId>` | `STATE` | Materialized current full state (server-side only — includes all hands), plus `version` for optimistic locking. Does not exist until the game is `ACTIVE` |
-| `PLAYER#<playerId>` | `GAME#<gameId>` | Lookup: which games a player is in, and their seat/turn/game status (for "my games" queries and notification targeting) |
+| `PLAYER#<playerId>` | `GAME#<gameId>` | Lookup: which games a player is in, and their seat/turn/game status, plus the `version` that status reflects and the `notified_version` already emailed about (for "my games" queries and notification targeting - section 8) |
 | `GAME#<gameId>` | `REQUEST#<requestId>` | Idempotency marker for a mutating request, storing the version it produced - a duplicate submission with the same client-generated request ID is a no-op returning the recorded version (section 9) |
 | `PLAYER#<playerId>` | `PROFILE` | Username, contact channels, created_at (section 6.1) |
 | `USERNAME#<lowercased>` | `PLAYER` | Username uniqueness reservation, claimed by conditional put |
 | `TOKEN#<sha256(token)>` | `TOKEN` | Auth token: player id, device label, created_at, last_used_at, expires_at |
 | `PLAYER#<playerId>` | `TOKEN#<sha256>` | Reverse lookup, so a player can list and revoke their devices |
+| `VERIFY#<sha256(token)>` | `TOKEN` | A pending contact-channel verification: player id, address, expires_at (section 6.1) |
+| `RESET#<sha256(token)>` | `TOKEN` | A pending password reset: player id, expires_at; short-lived and single use (section 6.1) |
 | `PLAYER#<playerId>` | `RULESET#<ruleSetId>` | A saved house-rule set: display name, the encoded `HouseRules`, created_at, updated_at (section 5.1) |
 | `GAME#<gameId>` | `INVITE#<playerId>` | An invite, from the game's side: read as a single `GetItem` when somebody tries to take a seat |
 | `PLAYER#<playerId>` | `INVITE#<gameId>` | The same invite from the invitee's side, so "my pending invites" is one Query |
@@ -106,6 +108,11 @@ appear in the next browse. That is acceptable - the creator has the join code an
 list - but it does mean an integration test has to poll rather than assert immediately, and that
 moto, being strongly consistent, will never reproduce the behaviour that makes the polling
 necessary.
+
+**Stream.** The table carries a `NEW_AND_OLD_IMAGES` stream, which is what section 8's notification
+Lambda reads. The old image is the load-bearing half: every rule there is a *transition* -
+`is_my_turn` becoming true, `status` becoming `COMPLETE` - and a new image alone cannot distinguish
+one from a rewrite of the same value, which is the difference between one email and one per move.
 
 Event example:
 ```json
@@ -259,6 +266,14 @@ REST-ish, a single FastAPI app behind one Lambda (via Mangum) and API Gateway:
 - `POST /sessions` - sign in on a device, returns a bearer token
 - `DELETE /sessions/current` - sign out, revoking this device's token
 - `GET /players/me` - own profile, contact channels, and active devices
+- `POST /players/me/contacts` - add a contact channel, unverified
+- `GET /players/me/contacts` - list my channels with their verified and notify flags
+- `PATCH /players/me/contacts/{address}` - mute or unmute notifications to it
+- `DELETE /players/me/contacts/{address}` - remove one
+- `POST /players/me/contacts/{address}/verification` - send a verification token to it
+- `POST /contacts/verify` - redeem a verification token; unauthenticated, the token is the credential
+- `POST /password-resets` - request a reset link; always `202`, whether or not the username exists
+- `POST /password-resets/confirm` - redeem a reset token, set a new password, revoke every device
 - `POST /players/me/rule-sets` - save a named house-rule set
 - `GET /players/me/rule-sets` - list my saved sets
 - `GET /players/me/rule-sets/{ruleSetId}` - read one
@@ -300,10 +315,24 @@ library. Passwords get a deliberately slow hash; tokens, being high-entropy rand
 sha256, which is the appropriate choice for each. Nothing here needs a dependency or an external
 service, so the whole auth path is testable offline.
 
-Two things are deliberately deferred rather than forgotten. **Password reset and email
-verification** need a send channel, which does not exist until Phase 4's SES work, so they land
-there. **Login rate limiting** is Phase 5; until then the floor is scrypt's cost plus error
-messages that do not distinguish an unknown username from a wrong password.
+**Contact channels are managed after signup, and verified before use.** A channel starts
+unverified; `POST /players/me/contacts/{address}/verification` mails a single-use token, and
+`POST /contacts/verify` redeems it. That last endpoint is deliberately unauthenticated - the token
+*is* the credential, and it arrives in an email the player may open on a device that has never
+signed in. A channel also carries a `notify` flag, so notifications can be muted without deleting
+the address. Verification is not bookkeeping: it is the gate deciding who the server is willing to
+send to, both for turn notifications (section 8) and for password reset below.
+
+**Password reset** is `POST /password-resets` (a username) followed by
+`POST /password-resets/confirm` (the token and a new password). Three properties, each ruling out
+an easier and wronger version: the request returns `202` whether or not the username exists, for
+the same reason sign-in will not say which half of a credential was wrong; the mail goes only to a
+**verified** channel, since an unverified address may be one an attacker supplied; and a completed
+reset revokes every issued token, because "somebody took my account" and "reset my password" are
+in practice the same event, and leaving the intruder's device signed in defeats the point.
+
+**Login rate limiting** remains deferred to Phase 5; until then the floor is scrypt's cost plus
+error messages that do not distinguish an unknown username from a wrong password.
 
 The threat model justifies that floor. An attacker who impersonates a player can see a hand and
 play moves — grief, not fraud. There is no money and no meaningful personal data beyond a display
@@ -406,6 +435,14 @@ Every endpoint in section 6 is reachable from a command:
 | `t42 login <username>` | `POST /sessions` |
 | `t42 logout` | `DELETE /sessions/current` |
 | `t42 whoami` | `GET /players/me` |
+| `t42 contacts` | `GET /players/me/contacts` |
+| `t42 contact add <address> [--kind email]` | `POST /players/me/contacts` |
+| `t42 contact remove <address>` | `DELETE /players/me/contacts/{address}` |
+| `t42 contact verify <address>` | `POST /players/me/contacts/{address}/verification` |
+| `t42 contact confirm <token>` | `POST /contacts/verify` |
+| `t42 contact mute\|unmute <address>` | `PATCH /players/me/contacts/{address}` |
+| `t42 forgot-password <username>` | `POST /password-resets` |
+| `t42 reset-password <token>` | `POST /password-resets/confirm` |
 | `t42 rules save <name> [rule flags]` | `POST /players/me/rule-sets` |
 | `t42 rules list` | `GET /players/me/rule-sets` |
 | `t42 rules show <id>` | `GET /players/me/rule-sets/{ruleSetId}` |
@@ -429,6 +466,11 @@ The five spellings of `bid` are one command because they are three request bodie
 discriminated on `kind` - the plunge confirmation being an auction move rather than a phase of its
 own (section 6). `uninvite` is the one command that makes two calls, because revocation is
 addressed by player id and people are not (section 6.2).
+
+`contact verify` and `contact confirm` are two commands rather than one for the same reason they
+are two endpoints: the token arrives by email, minutes or hours later, possibly on another
+machine. Both work signed out - like `register` and `login`, but for a different reason: the token
+they carry is itself the credential (section 6.1).
 
 House-rule flags on `create-game` and `rules save` follow section 5.1's model directly:
 `--contracts nello,plunge,sevens`, `--marks 7`, `--doubles-trump`, `--declared-leads first_trick`,
@@ -489,7 +531,37 @@ lives, so a provisioned endpoint later is a configuration change and not a code 
 
 ## 8. Notifications (MVP)
 
-DynamoDB Streams on the `Texas42` table triggers a Lambda on new `PLAY_DOMINO`/`BID`/`PASS` events. It computes the new current player and sends an email via SES ("It's your turn in game 7f3a"). No push infra needed for a CLI-only MVP; this is also the natural extension point for SMS/push/chat-bot messages later, since the trigger and "whose turn now" logic don't change per client type.
+A game measured in hours only works if a player who is not watching a terminal is told when
+something needs them. DynamoDB Streams on the `Texas42` table triggers a notification Lambda, which
+sends an email via SES ("It's your turn in game 7F3AKM"). No push infrastructure is needed for a
+CLI-only MVP, and this is the extension point for SMS, push or a chat bot later - a new
+implementation of the sender protocol, not a new trigger, because the interesting work is deciding
+*who* to tell and that does not vary by client type.
+
+**The trigger is the `PLAYER#` item, not the event log.** Every write already stamps `is_my_turn`
+and `status` onto each of the four `PLAYER#<playerId>/GAME#<gameId>` items in the same transaction
+as the move (section 4.1). So whose turn it is has already been computed, by the one component
+entitled to compute it, and the stream record naming the player *is* the notification. Three
+transitions on items in the recipient's own `PLAYER#` partition cover everything worth an email:
+
+| Transition | Message |
+|---|---|
+| `is_my_turn` false → true on `GAME#<gameId>` | It's your turn |
+| `status` `ACTIVE` → `COMPLETE` on `GAME#<gameId>` | The game is over, with the final marks |
+| Insert of `INVITE#<gameId>` | You've been invited to a table |
+
+The consequence worth stating: **the notification Lambda never reads the `STATE` item**, so it
+never sees a hand, and section 4.2's gate is not something it can bypass because it holds nothing
+to leak. It enriches from `META` only - seat usernames, join code, final marks - all of which are
+public at a real table. The rejected alternative was streaming on `EVENT#` items and recomputing
+the current player, which would have to reach for `STATE` or replay the log to answer a question
+already answered, and would put a second whose-turn-is-it implementation next to the first.
+
+Two supporting details. Streams are **at-least-once**, so the send is gated on conditionally
+advancing a `notified_version` attribute on the same `PLAYER#` item - no successful condition, no
+email, and a redelivered record is silently dropped. And a message goes only to a contact channel
+that is `verified` and not muted (section 6.1), which is what makes email verification part of this
+phase rather than a later nicety: it is the gate on who the server is willing to write to.
 
 ## 9. Non-Functional Notes
 
@@ -516,7 +588,7 @@ Saved rule sets, invite-by-username, public/invite-only visibility, and the open
 Implement the command set in section 7 against a locally hosted API - `uvicorn` over DynamoDB Local - including the Phase 2.7 commands. Dogfood a full 4-player game manually: four profiles (section 7.1) in four terminal sessions. Nothing is provisioned in this phase; deploy scripting stays in Phase 5, and the CLI reaches a real endpoint later by changing `--api-url` and nothing else.
 
 **Phase 4 — Notifications**
-DynamoDB Streams → Lambda → SES. Verify against real play across a delay (simulate the "hours between moves" case).
+DynamoDB Streams → Lambda → SES, for the three transitions in section 8: your turn, you've been invited, your game is over. Carries the account work section 6.1 deferred until a send channel existed - contact-channel management, email verification and password reset - since verification is what decides who may be mailed at all. Verified against real play across a delay (the "hours between moves" case), locally: DynamoDB Local implements the Streams API, so nothing is provisioned in this phase either and deploy scripting stays in Phase 5.
 
 **Phase 5 — Hardening**
 Abandoned-game handling, better CLI error messages/help, deploy scripting (SAM/CDK/Terraform — pick one), basic logging/observability.
@@ -601,6 +673,18 @@ The Phase 3 CLI is the first test of this claim rather than a restatement of it,
 - Resolved: **the MVP CLI is dogfooded against a locally hosted API** (section 7.3), not a deployed
   one. Deploy scripting stays in Phase 5, where it was, rather than being pulled forward to give the
   CLI something to point at; `--api-url` is the only thing that changes when a real endpoint exists.
+- Resolved: **notifications trigger on the `PLAYER#` item's transitions, not on new `EVENT#` items**
+  (section 8). Earlier drafts of section 8 said to stream on plays and recompute the current player;
+  section 13 already assumed the `is_my_turn` flip, and that reading wins. Every write already
+  stamps `is_my_turn` and `status` onto the four `PLAYER#/GAME#` items in the move's own
+  transaction, so the stream record naming the player is the notification, and the notifier never
+  needs to read `STATE` - the item holding every hand. The rejected version would have had to, and
+  would have stood up a second whose-turn-is-it implementation beside the engine's.
+- Resolved: **Phase 4 is verified locally too**, the same answer section 7.3 gave for Phase 3.
+  DynamoDB Local implements the Streams API, so a small poller can feed the real handler real
+  records, and SES is one implementation of a sender protocol that a console sender also
+  implements. Pulling stream and SES provisioning forward was rejected for the reason the same
+  question was rejected for the CLI: it buys the phase nothing and costs it its focus.
 
 ## 13. Bot Players (post-MVP)
 

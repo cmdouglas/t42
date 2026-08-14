@@ -1,7 +1,7 @@
 # Roadmap
 
-Execution breakdown for the phases in [DESIGN.md](DESIGN.md) §10. Phases 0 through 3 are broken
-down in full; Phases 4 to 6 are sketched and will be expanded as they come up.
+Execution breakdown for the phases in [DESIGN.md](DESIGN.md) §10. Phases 0 through 4 are broken
+down in full; Phases 5 and 6 are sketched and will be expanded as they come up.
 
 Scaffolding is committed: toolchain, engine module layout, and the implemented primitives listed
 under "Done" below.
@@ -632,11 +632,174 @@ The one piece of non-CLI code in the phase. The table definition currently exist
 
 ---
 
+## Phase 4: Notifications
+
+Goal: a player who is not looking at a terminal finds out that it is their turn. DESIGN.md §8 is
+the spec and this section sequences it, widened to the three things actually worth an email - your
+turn, you've been invited, your game is over - and carrying the account work DESIGN.md §6.1
+deferred to "whenever a send channel exists", which is now.
+
+Four decisions govern everything below. The first is a contradiction between two sections of
+DESIGN.md and has to be settled before any code is written.
+
+- **The trigger is the `PLAYER#` item, not the event log.** DESIGN.md §8 says stream on new
+  `EVENT#` items and recompute the current player; §13 says react to the `is_my_turn` flip on the
+  `PLAYER#<id>/GAME#<id>` items. §13 wins. `append` already stamps `is_my_turn` and `status` onto
+  all four of those items inside the move's own transaction (`repository.py`), and `start_game`
+  does the same on the deal, so whose turn it is has already been computed by the one component
+  entitled to compute it. §8's version would have to reach for `STATE` - the item holding every
+  hand - or replay the log to answer a question that is already answered.
+
+  This generalizes past turn notifications: **all three notifications are transitions on items in
+  the recipient's own `PLAYER#` partition** - `is_my_turn` false to true, `status` `ACTIVE` to
+  `COMPLETE`, and an `INVITE#<gameId>` insert. One handler, three rules, one partition prefix, and
+  no game state at all. The notifier never reads `STATE`, so invariant 5 holds for it by
+  construction rather than by audit, and 4.7 makes that a test rather than a claim.
+
+- **It runs locally**, the same answer 3.6 gave for the API. DynamoDB Local implements the Streams
+  API, so `python -m t42.notifications.pump` polls the stream and hands the handler batches shaped
+  exactly like a Lambda `Records` event, and SES is one implementation of a narrow sender protocol
+  sitting beside a console one. The AWS-side wiring - event-source mapping, SES identity, IAM - is
+  Phase 5's deployment work, and none of this phase's code changes when it lands.
+
+- **Streams are at-least-once**, so a record can arrive twice and an email must not. A
+  `notified_version` attribute on the `PLAYER#/GAME#` item, advanced by a conditional write
+  (`attribute_not_exists(notified_version) OR notified_version < :v`), gates the send: no
+  successful condition, no email. This is why 4.5 also has `append`/`start_game` stamp `version`
+  onto those items - one more expression value in an update they already do. The notifier's own
+  write produces a further stream record, which matches none of the three rules and is dropped, so
+  there is no loop.
+
+- **`verified` is currently never set to `true` by anything**, and no endpoint touches contacts
+  after `POST /players`. Email verification is therefore not a nicety in this phase; it is the gate
+  deciding who the notifier may write to, and it has to land before the notifier does.
+
+### 4.1 The send channel
+
+New top-level package `src/t42/notifications/`. It may import `t42.storage.accounts` and boto3; it
+may not import `t42.engine`, nor `t42.storage`'s `repository`, `codec` or `replay` - the import
+rule that makes "cannot see a hand" checkable (4.7).
+
+- `sender.py`: an `EmailSender` protocol - `send(to, subject, body) -> None` - with `SesSender`
+  over boto3 `sesv2`, `ConsoleSender` for a local run, and a recording fake for tests. Chosen by
+  environment variable, the same shape `t42.api.deps` already uses for the table handle. A protocol
+  rather than a function so DESIGN.md §11's claim holds here too: SMS or a chat DM is another
+  implementation, not a rewrite.
+- `messages.py`: pure `dict -> (subject, body)` renderers, plain text, one per notification kind.
+  Same "no I/O, no client library, table-testable" property `t42/cli/render.py` has, and for the
+  same reason - the interesting part of a message is its content, and content should be assertable
+  without a transport.
+
+### 4.2 Contact channels and email verification
+
+- `ContactChannel` gains `notify: bool = True`, decoded through `.get("notify", True)` so existing
+  items need no migration. Without a per-channel mute there is nowhere to turn notifications off,
+  and a player at three tables gets a mail flood with no recourse but deleting the address.
+- New item `VERIFY#<sha256(token)>` / `TOKEN` holding `{player_id, address, expires_at}`, mirroring
+  the `TOKEN#<sha256>` shape `accounts.py` already uses: the hash is stored and the plaintext is
+  unrecoverable, so a leaked table dump is not a set of live verification links.
+- `accounts.py` gains `add_contact`, `remove_contact`, `set_contact_notify`, `begin_verification`
+  and `complete_verification`.
+- Endpoints: `POST`/`GET /players/me/contacts`, `PATCH /players/me/contacts/{address}` (the mute),
+  `DELETE /players/me/contacts/{address}`, `POST /players/me/contacts/{address}/verification`, and
+  `POST /contacts/verify`. The last is unauthenticated: the token *is* the credential, and it
+  arrives in an email the player may open on a device that has never run `t42 login`.
+
+### 4.3 Password reset
+
+- New item `RESET#<sha256(token)>` / `TOKEN`, the same shape as 4.2's, with a short expiry and
+  single use.
+- `POST /password-resets` taking a username, and `POST /password-resets/confirm` taking the token
+  and a new password.
+- Three properties, each ruling out an easier wrong version. The request endpoint returns `202`
+  whether or not the username exists, for the same reason `authenticate` will not say which half of
+  a credential was wrong. It sends only to a **verified** channel, because an unverified address is
+  one an attacker may have supplied. And a completed reset revokes every issued token, because "my
+  account was taken" and "reset my password" are in practice the same event, and leaving the
+  intruder's device signed in defeats the reset.
+- Login rate limiting stays in Phase 5, unchanged. Stated here so the omission reads as a decision
+  rather than an oversight, since this is the phase that adds a second way to take an account over.
+
+### 4.4 Streams and the local pump
+
+- `schema.py` gains a `StreamSpecification` with `StreamViewType="NEW_AND_OLD_IMAGES"`. Old images
+  are what make a *transition* detectable rather than merely a current state, and every rule in 4.5
+  is a transition. One change, picked up by the moto and DynamoDB Local fixtures alike, which is
+  the property 3.6 moved that module out of `conftest.py` for.
+- `records.py`: stream records carry DynamoDB-JSON attribute values, not the plain dicts the
+  resource-level `Table` API hands back everywhere else in this codebase - the one place that gap
+  is visible. One `boto3.dynamodb.types.TypeDeserializer` pass plus a typed `Transition(old, new)`,
+  so 4.5's rules are written against plain data and can be tested without a stream.
+- `pump.py`: `python -m t42.notifications.pump` polls the local stream and calls the handler with a
+  Lambda-shaped `{"Records": [...]}` batch, so the local path and the deployed path exercise the
+  same entry point. Same `python -m` precedent as `t42.storage.schema`.
+
+### 4.5 The handler
+
+`handler.py`: `lambda_handler(event, context)` over a pure `notifications_for(records)`.
+
+- Filter to `PK` beginning `PLAYER#`, then three rules - `is_my_turn` false to true (your turn),
+  `status` `ACTIVE` to `COMPLETE` (game over), and an insert with `SK` beginning `INVITE#` (you've
+  been invited).
+- Resolve recipients through `accounts.get_player`, dropping any channel that is not
+  `kind == "email"` **and** `verified` **and** `notify`. A player with no routable channel is a
+  no-op, not an error - contacts are optional by design (DESIGN.md §12).
+- Enrich from `META` only: seat usernames, status, join code, all of it public. For the game-over
+  message to carry a final score, `append` denormalizes the public `marks` onto `META` as it
+  completes the game. That is the whole point - the alternative is reading `STATE`, which is the
+  one thing this component must not do.
+- The invite message wants to say who invited you, and cannot: `invite_player` writes only
+  `{game_id, created_at}` on the player-side item. Add `invited_by` to it - one attribute, one call
+  site in `app.py`'s invite handler, which already knows the inviter because `_require_seat` just
+  checked them.
+- Dedupe through the conditional `notified_version` advance described in the preamble.
+
+### 4.6 CLI commands
+
+`src/t42/cli/commands/account.py`, following 3.4's pattern with no new machinery: `t42 contacts`,
+`t42 contact add|remove|verify|confirm|mute|unmute`, `t42 forgot-password`, `t42 reset-password`.
+DESIGN.md §7's command table gets the matching rows in the same pass, since that table is the
+statement that every endpoint is reachable from a command.
+
+`contact confirm` and `reset-password` work **signed out**, since the token they carry is itself
+the credential. That needs nothing new: `build_client`'s `require_auth=False` already exists for
+`register` and `login`, which is the point of noting it - this sub-phase should add no machinery
+at all.
+
+### 4.7 Tests
+
+`tests/notifications/`, mirroring the package as every other suite here does.
+
+- `test_messages.py` - table-driven over the pure renderers.
+- `test_handler.py` - hand-built stream records against the recording sender: each rule fires
+  exactly once, a duplicate record sends nothing, an unverified or muted or absent channel sends
+  nothing, and a `PLAYER#` record whose watched attribute did not change is ignored.
+- `test_layering.py` - the `ast` check from `tests/cli/test_layering.py`, retargeted: nothing under
+  `t42.notifications` imports `t42.engine`, `t42.storage.repository`, `t42.storage.codec` or
+  `t42.storage.replay`. Cheap, and it is the whole difference between "the notifier cannot see a
+  hand" being an argument and being a fact - the same trade 3.7 made for the CLI.
+- `tests/api/test_contacts.py` and `test_password_reset.py` - the four-case contract matrix, with a
+  fake sender injected through `app.dependency_overrides` beside the existing `table` override.
+- `tests/notifications/test_integration.py`, marked `integration` - **the phase milestone**:
+  against DynamoDB Local, play a real game through the API, drive the pump, and assert the right
+  seat is mailed at each turn, with a real wall-clock gap between two moves. This is DESIGN.md
+  §10's "verify against real play across a delay", earned without provisioning anything.
+
+### Exit criteria
+
+- The seat to act is emailed exactly once per turn, proven across a real delay against DynamoDB
+  Local, and not at all when its channel is unverified or muted
+- A duplicated stream record sends nothing
+- Nothing under `t42.notifications` can reach `STATE` or the engine, proven by test
+- A contact can be added, verified, muted and removed from the CLI
+- A forgotten password can be recovered end to end through a verified channel, and doing so revokes
+  every device
+- Nothing is provisioned: the AWS-side wiring is still Phase 5's
+
+---
+
 ## Later phases
 
-- **Phase 4, Notifications**: DynamoDB Streams to Lambda to SES, verified across a real delay.
-  Also the natural home for the deferred account work: password reset and email verification,
-  which need a send channel and have none before this point
 - **Phase 5, Hardening**: abandoned games, CLI errors and help, observability, login rate limiting
 - **Phase 6, Bot players**: DESIGN.md §13. Bot accounts, a uniform-random-legal policy over the
   projected view's `legal_moves`, and a Streams-driven turn trigger reusing Phase 4's plumbing. Last
