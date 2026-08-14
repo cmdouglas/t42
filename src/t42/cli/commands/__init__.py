@@ -3,6 +3,6 @@
 from __future__ import annotations
 
 from t42.cli.command import Command
-from t42.cli.commands import account, rules, tables
+from t42.cli.commands import account, play, rules, tables
 
-COMMANDS: tuple[Command, ...] = account.COMMANDS + rules.COMMANDS + tables.COMMANDS
+COMMANDS: tuple[Command, ...] = account.COMMANDS + rules.COMMANDS + tables.COMMANDS + play.COMMANDS
