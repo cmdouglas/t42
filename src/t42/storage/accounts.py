@@ -1,6 +1,6 @@
-"""Player accounts and auth tokens (ROADMAP.md 2.1, DESIGN.md §6.1).
+"""Player accounts and auth tokens (ROADMAP.md 2.1, 4.2, DESIGN.md §6.1).
 
-Four item types in the same single table as the games (DESIGN.md §4.1), so no GSI and no second
+Five item types in the same single table as the games (DESIGN.md §4.1), so no GSI and no second
 table are needed:
 
 ``PLAYER#<id> / PROFILE``
@@ -13,6 +13,10 @@ table are needed:
 ``PLAYER#<id> / TOKEN#<sha256>``
     The same fact stored the other way round, so a player can list and revoke their own devices
     without a scan. Both are written in one transaction and deleted in one transaction.
+``VERIFY#<sha256(token)> / TOKEN``
+    A pending contact-channel verification: player id, address, expires_at. Unlike a bearer
+    token, nothing needs to list a player's pending verifications, so there is no reverse index -
+    one item, minted by :func:`begin_verification` and consumed by :func:`complete_verification`.
 
 **Two hashes, on purpose.** A password is low-entropy and human-chosen, so it gets ``scrypt``,
 which is deliberately slow and memory-hard. A token is 32 bytes from ``secrets``, so brute force
@@ -35,8 +39,8 @@ import hmac
 import secrets
 from base64 import urlsafe_b64decode, urlsafe_b64encode
 from collections.abc import Callable, Iterable, Mapping
-from dataclasses import dataclass
-from datetime import UTC, datetime
+from dataclasses import dataclass, replace
+from datetime import UTC, datetime, timedelta
 from typing import Any, Final
 
 from botocore.exceptions import ClientError
@@ -45,7 +49,15 @@ from mypy_boto3_dynamodb.service_resource import Table
 from t42.engine.state import PlayerId
 
 from ._dynamo import as_text, is_transaction_cancelled, transact_write
-from .errors import InvalidCredentials, InvalidToken, PlayerNotFound, UsernameTaken
+from .errors import (
+    ContactAlreadyExists,
+    ContactNotFound,
+    InvalidCredentials,
+    InvalidToken,
+    InvalidVerificationToken,
+    PlayerNotFound,
+    UsernameTaken,
+)
 
 #: scrypt cost parameters. ``n=2**14`` with ``r=8`` needs ~16 MiB per hash, which is a sane bar on
 #: a 128 MB Lambda and takes well under a second. They are recorded in each stored hash rather
@@ -57,6 +69,8 @@ _SCRYPT_DKLEN: Final = 32
 _SALT_BYTES: Final = 16
 _TOKEN_BYTES: Final = 32
 _PLAYER_ID_BYTES: Final = 12
+#: How long a mailed verification token stays redeemable (ROADMAP.md 4.2).
+_VERIFICATION_TTL: Final = timedelta(hours=24)
 
 
 def _utcnow() -> datetime:
@@ -73,6 +87,10 @@ def _username_pk(username: str) -> str:
 
 def _token_pk(token_hash: str) -> str:
     return f"TOKEN#{token_hash}"
+
+
+def _verify_pk(token_hash: str) -> str:
+    return f"VERIFY#{token_hash}"
 
 
 def _token_sk(token_hash: str) -> str:
@@ -147,6 +165,10 @@ class ContactChannel:
     kind: str
     address: str
     verified: bool = False
+    #: Per-channel mute, so notifications can be turned off without deleting the address
+    #: (ROADMAP.md 4.2). Decoded through ``.get("notify", True)`` so items written before this
+    #: field existed need no migration.
+    notify: bool = True
 
 
 @dataclass(frozen=True, slots=True)
@@ -172,14 +194,29 @@ class Device:
 
 
 def _encode_contacts(contacts: Iterable[ContactChannel]) -> list[dict[str, Any]]:
-    return [{"kind": c.kind, "address": c.address, "verified": c.verified} for c in contacts]
+    return [
+        {"kind": c.kind, "address": c.address, "verified": c.verified, "notify": c.notify}
+        for c in contacts
+    ]
 
 
 def _decode_contacts(data: Any) -> tuple[ContactChannel, ...]:
     return tuple(
-        ContactChannel(kind=c["kind"], address=c["address"], verified=bool(c["verified"]))
+        ContactChannel(
+            kind=c["kind"],
+            address=c["address"],
+            verified=bool(c["verified"]),
+            notify=bool(c.get("notify", True)),
+        )
         for c in data or ()
     )
+
+
+def _find_contact(contacts: tuple[ContactChannel, ...], address: str) -> ContactChannel:
+    for contact in contacts:
+        if contact.address == address:
+            return contact
+    raise ContactNotFound(address)
 
 
 def _player_from_item(item: Mapping[str, Any]) -> Player:
@@ -433,3 +470,113 @@ def list_tokens(table: Table, player_id: PlayerId) -> tuple[Device, ...]:
         for item in response.get("Items", ())
     ]
     return tuple(sorted(devices, key=lambda d: d.created_at, reverse=True))
+
+
+def _get_profile_item(table: Table, player_id: PlayerId) -> dict[str, Any]:
+    item = table.get_item(Key={"PK": _player_pk(player_id), "SK": "PROFILE"}).get("Item")
+    if item is None:
+        raise KeyError(f"no player with id {player_id!r}")
+    return dict(item)
+
+
+def _write_contacts(
+    table: Table, player_id: PlayerId, contacts: tuple[ContactChannel, ...]
+) -> None:
+    table.update_item(
+        Key={"PK": _player_pk(player_id), "SK": "PROFILE"},
+        UpdateExpression="SET contacts = :c",
+        ExpressionAttributeValues={":c": _encode_contacts(contacts)},
+    )
+
+
+def add_contact(table: Table, player_id: PlayerId, kind: str, address: str) -> Player:
+    """Appends a new, unverified, un-muted channel.
+
+    Raises :class:`~t42.storage.errors.ContactAlreadyExists` if this address is already
+    registered - every other contact operation names a channel by its address, so duplicates
+    would make "the" channel ambiguous.
+    """
+    item = _get_profile_item(table, player_id)
+    contacts = _decode_contacts(item.get("contacts"))
+    if any(c.address == address for c in contacts):
+        raise ContactAlreadyExists(address)
+    new_contacts = (*contacts, ContactChannel(kind=kind, address=address))
+    _write_contacts(table, player_id, new_contacts)
+    return _player_from_item({**item, "contacts": _encode_contacts(new_contacts)})
+
+
+def remove_contact(table: Table, player_id: PlayerId, address: str) -> Player:
+    """Removes one channel by address. Raises :class:`~t42.storage.errors.ContactNotFound` if no
+    channel has this address."""
+    item = _get_profile_item(table, player_id)
+    contacts = _decode_contacts(item.get("contacts"))
+    _find_contact(contacts, address)
+    new_contacts = tuple(c for c in contacts if c.address != address)
+    _write_contacts(table, player_id, new_contacts)
+    return _player_from_item({**item, "contacts": _encode_contacts(new_contacts)})
+
+
+def set_contact_notify(table: Table, player_id: PlayerId, address: str, notify: bool) -> Player:
+    """Mutes or unmutes one channel without deleting it. Raises
+    :class:`~t42.storage.errors.ContactNotFound` if no channel has this address."""
+    item = _get_profile_item(table, player_id)
+    contacts = _decode_contacts(item.get("contacts"))
+    _find_contact(contacts, address)
+    new_contacts = tuple(replace(c, notify=notify) if c.address == address else c for c in contacts)
+    _write_contacts(table, player_id, new_contacts)
+    return _player_from_item({**item, "contacts": _encode_contacts(new_contacts)})
+
+
+def begin_verification(
+    table: Table, player_id: PlayerId, address: str, *, now: Callable[[], datetime] = _utcnow
+) -> str:
+    """Mints a single-use verification token for one contact channel and returns it - the only
+    time its plaintext exists outside the caller, mirroring :func:`issue_token`.
+
+    Raises :class:`~t42.storage.errors.ContactNotFound` if the address is not one of this
+    player's channels.
+    """
+    item = _get_profile_item(table, player_id)
+    contacts = _decode_contacts(item.get("contacts"))
+    _find_contact(contacts, address)
+
+    token = secrets.token_urlsafe(_TOKEN_BYTES)
+    digest = hash_token(token)
+    expires_at = (now() + _VERIFICATION_TTL).isoformat()
+    table.put_item(
+        Item={
+            "PK": _verify_pk(digest),
+            "SK": "TOKEN",
+            "player_id": player_id,
+            "address": address,
+            "expires_at": expires_at,
+        }
+    )
+    return token
+
+
+def complete_verification(
+    table: Table, token: str, *, now: Callable[[], datetime] = _utcnow
+) -> None:
+    """Redeems a verification token, marking its channel verified.
+
+    The ``VERIFY#`` item is deleted whether or not the token turns out to be expired, so it can
+    never be replayed (DESIGN.md §6.1: "mails a single-use token"). Raises
+    :class:`~t42.storage.errors.InvalidVerificationToken` if the token was never issued, has
+    already been redeemed, or has expired. A no-op, not an error, if the channel was removed
+    between minting and redeeming - there is nothing left to verify.
+    """
+    key = {"PK": _verify_pk(hash_token(token)), "SK": "TOKEN"}
+    item = table.get_item(Key=key).get("Item")
+    if item is None:
+        raise InvalidVerificationToken
+    table.delete_item(Key=key)
+    if as_text(item["expires_at"]) < now().isoformat():
+        raise InvalidVerificationToken
+
+    player_id: PlayerId = as_text(item["player_id"])
+    address = as_text(item["address"])
+    profile_item = _get_profile_item(table, player_id)
+    contacts = _decode_contacts(profile_item.get("contacts"))
+    new_contacts = tuple(replace(c, verified=True) if c.address == address else c for c in contacts)
+    _write_contacts(table, player_id, new_contacts)

@@ -21,6 +21,7 @@ from fastapi import Depends, Header
 from mypy_boto3_dynamodb.service_resource import Table
 
 from t42.engine.state import PlayerId
+from t42.notifications import EmailSender, get_sender
 from t42.storage.accounts import player_for_token
 
 from .errors import not_authenticated
@@ -50,6 +51,10 @@ def get_table() -> Table:
 
 
 TableDep = Annotated[Table, Depends(get_table)]
+
+#: Overridden wholesale in tests, the same way ``get_table`` is - see ``t42.notifications.sender``
+#: for the environment variable that picks the production implementation.
+EmailSenderDep = Annotated[EmailSender, Depends(get_sender)]
 
 
 def get_bearer_token(authorization: Annotated[str | None, Header()] = None) -> str:

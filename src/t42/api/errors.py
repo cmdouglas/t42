@@ -29,11 +29,14 @@ from fastapi.responses import JSONResponse
 from t42.engine.errors import IllegalMove, OutOfTurn, RulesError, UnknownContract
 from t42.storage.errors import (
     AlreadySeated,
+    ContactAlreadyExists,
+    ContactNotFound,
     GameAlreadyExists,
     GameNotFound,
     GameNotJoinable,
     InvalidCredentials,
     InvalidToken,
+    InvalidVerificationToken,
     NotInvited,
     PlayerNotFound,
     RuleSetNotFound,
@@ -92,10 +95,12 @@ _MAPPING: Final[tuple[tuple[type[Exception], int, str], ...]] = (
     # 401 - who are you?
     (InvalidToken, status.HTTP_401_UNAUTHORIZED, "INVALID_TOKEN"),
     (InvalidCredentials, status.HTTP_401_UNAUTHORIZED, "INVALID_CREDENTIALS"),
+    (InvalidVerificationToken, status.HTTP_401_UNAUTHORIZED, "INVALID_VERIFICATION_TOKEN"),
     # 404 - no such thing
     (GameNotFound, status.HTTP_404_NOT_FOUND, "GAME_NOT_FOUND"),
     (RuleSetNotFound, status.HTTP_404_NOT_FOUND, "RULE_SET_NOT_FOUND"),
     (PlayerNotFound, status.HTTP_404_NOT_FOUND, "PLAYER_NOT_FOUND"),
+    (ContactNotFound, status.HTTP_404_NOT_FOUND, "CONTACT_NOT_FOUND"),
     # 403 - well-formed, correctly authenticated, but not allowed
     (NotInvited, status.HTTP_403_FORBIDDEN, "NOT_INVITED"),
     # 409 - the world is not in the state this request assumed
@@ -106,6 +111,7 @@ _MAPPING: Final[tuple[tuple[type[Exception], int, str], ...]] = (
     (GameNotJoinable, status.HTTP_409_CONFLICT, "GAME_NOT_JOINABLE"),
     (GameAlreadyExists, status.HTTP_409_CONFLICT, "GAME_ALREADY_EXISTS"),
     (UsernameTaken, status.HTTP_409_CONFLICT, "USERNAME_TAKEN"),
+    (ContactAlreadyExists, status.HTTP_409_CONFLICT, "CONTACT_ALREADY_EXISTS"),
     # 400 - well-formed, but the rules say no
     (UnknownContract, status.HTTP_400_BAD_REQUEST, "UNKNOWN_CONTRACT"),
     (IllegalMove, status.HTTP_400_BAD_REQUEST, "ILLEGAL_MOVE"),
