@@ -13,6 +13,7 @@ from t42.storage.errors import GameNotFound, NotInvited
 from t42.storage.invites import (
     find_invite,
     invite_player,
+    list_invites_for_game,
     list_invites_for_player,
     revoke_invite,
 )
@@ -72,6 +73,29 @@ def test_list_invites_for_player_is_scoped_and_newest_first(table: Table) -> Non
     invites = list_invites_for_player(table, "east")
 
     assert {i.game_id for i in invites} == {"g1", "g2"}
+
+
+def test_list_invites_for_game_is_scoped_and_newest_first(table: Table) -> None:
+    invite_player(table, "g1", "east", "east")
+    invite_player(table, "g1", "south", "south")
+    invite_player(table, "g2", "west", "west")
+
+    invites = list_invites_for_game(table, "g1")
+
+    assert {i.player_id for i in invites} == {"east", "south"}
+    assert {i.username for i in invites} == {"east", "south"}
+
+
+def test_list_invites_for_game_shrinks_on_revoke_or_join(table: Table) -> None:
+    _open_lobby(table, Visibility.INVITE_ONLY)
+    invite_player(table, "g1", "east", "east")
+    invite_player(table, "g1", "south", "south")
+
+    revoke_invite(table, "g1", "south")
+    assert {i.player_id for i in list_invites_for_game(table, "g1")} == {"east"}
+
+    join_seat(table, "g1", "east", "east", Seat.EAST, rng=Random(0))
+    assert list_invites_for_game(table, "g1") == ()
 
 
 def test_join_seat_refuses_an_uninvited_player_on_an_invite_only_game(table: Table) -> None:

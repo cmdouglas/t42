@@ -104,6 +104,52 @@ def test_an_invite_that_goes_unused_drops_off_once_the_table_fills(
     assert bob.my_invites()["games"] == []
 
 
+def test_a_seated_player_can_list_who_is_invited(alice: Client, bob: Client, carol: Client) -> None:
+    game_id = alice.create_game(seat=0, visibility="invite_only")
+    alice.invite(game_id, bob.username)
+
+    response = alice.list_invites(game_id)
+
+    assert response.status_code == 200
+    invites = response.json()["invites"]
+    assert [i["username"] for i in invites] == [bob.username]
+    assert invites[0]["player_id"] == bob.player_id
+
+
+def test_a_fresh_table_has_no_invites(alice: Client) -> None:
+    game_id = alice.create_game(seat=0, visibility="invite_only")
+
+    response = alice.list_invites(game_id)
+
+    assert response.status_code == 200
+    assert response.json()["invites"] == []
+
+
+def test_an_invite_drops_off_the_game_list_once_joined(alice: Client, bob: Client) -> None:
+    game_id = alice.create_game(seat=0, visibility="invite_only")
+    alice.invite(game_id, bob.username)
+
+    bob.join(game_id, 1)
+
+    assert alice.list_invites(game_id).json()["invites"] == []
+
+
+def test_a_non_seated_caller_cannot_list_invites(alice: Client, bob: Client) -> None:
+    game_id = alice.create_game(seat=0, visibility="invite_only")
+
+    response = bob.list_invites(game_id)
+
+    assert response.status_code == 403
+    assert response.json()["error"]["code"] == "NOT_A_PLAYER"
+
+
+def test_listing_invites_for_an_unknown_game_is_404(alice: Client) -> None:
+    response = alice.list_invites("NOPE12")
+
+    assert response.status_code == 404
+    assert response.json()["error"]["code"] == "GAME_NOT_FOUND"
+
+
 def test_inviting_an_unknown_username_is_404(alice: Client) -> None:
     game_id = alice.create_game(seat=0, visibility="invite_only")
 

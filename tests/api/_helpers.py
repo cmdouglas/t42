@@ -83,6 +83,9 @@ class Client:
         body: dict[str, Any] = response.json()
         return body
 
+    def list_invites(self, game_id: str) -> Response:
+        return self.get(f"/games/{game_id}/invites")
+
 
 def seated_game(players: list[Client], **house_rules: Any) -> str:
     """A dealt game with ``players`` in seats 0-3, reached the way a real one is: one creates a

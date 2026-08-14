@@ -190,6 +190,19 @@ class InviteResponse(BaseModel):
     username: str
 
 
+class InvitedPlayerResponse(BaseModel):
+    player_id: PlayerId
+    username: str
+    created_at: str
+
+
+class GameInvitesResponse(BaseModel):
+    """Who is currently invited to a table (DESIGN.md §6.2) - the host-side counterpart to
+    ``InviteListResponse``."""
+
+    invites: list[InvitedPlayerResponse]
+
+
 class BidBody(_Strict):
     """A numeric bid (30-42) or a mark bid naming its contract. Which combinations are legal is
     the auction's business, not this model's."""
