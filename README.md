@@ -64,14 +64,7 @@ docker run -d --name t42-ddb -p 8123:8000 amazon/dynamodb-local:latest
 export AWS_ACCESS_KEY_ID=local AWS_SECRET_ACCESS_KEY=local AWS_DEFAULT_REGION=us-east-1
 export T42_TABLE_NAME=Texas42 T42_DYNAMODB_ENDPOINT=http://localhost:8123
 
-uv run python -c "
-import boto3
-boto3.resource('dynamodb', endpoint_url='http://localhost:8123').create_table(
-    TableName='Texas42',
-    KeySchema=[{'AttributeName':'PK','KeyType':'HASH'},{'AttributeName':'SK','KeyType':'RANGE'}],
-    AttributeDefinitions=[{'AttributeName':'PK','AttributeType':'S'},
-                          {'AttributeName':'SK','AttributeType':'S'}],
-    BillingMode='PAY_PER_REQUEST').wait_until_exists()"
+uv run python -m t42.storage.schema
 
 uv run uvicorn t42.api.app:app --reload --port 8765
 ```
