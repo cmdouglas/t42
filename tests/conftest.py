@@ -20,51 +20,17 @@ import boto3
 import pytest
 from botocore.exceptions import EndpointConnectionError
 from moto import mock_aws
-from mypy_boto3_dynamodb.service_resource import DynamoDBServiceResource, Table
+from mypy_boto3_dynamodb.service_resource import Table
 from testcontainers.core.container import DockerContainer
 
-
-def _create_texas42_table(resource: DynamoDBServiceResource) -> Table:
-    """Shared by ``table`` (moto) and ``real_table`` (DynamoDB Local) so the schema can't drift
-    between the two - written with literal kwargs, not a splatted dict, since boto3-stubs types
-    ``create_table`` as a set of overloads keyed on exactly those keyword names.
-
-    The ``OpenGames`` GSI (DESIGN.md §4.1, ROADMAP.md 2.7.3) is the table's only secondary index:
-    a sparse index on ``GSI1PK``/``GSI1SK``, populated only by a public ``WAITING`` game's ``META``
-    item, projecting ``ALL`` so a browse row needs no follow-up read.
-    """
-    resource.create_table(
-        TableName="Texas42",
-        KeySchema=[
-            {"AttributeName": "PK", "KeyType": "HASH"},
-            {"AttributeName": "SK", "KeyType": "RANGE"},
-        ],
-        AttributeDefinitions=[
-            {"AttributeName": "PK", "AttributeType": "S"},
-            {"AttributeName": "SK", "AttributeType": "S"},
-            {"AttributeName": "GSI1PK", "AttributeType": "S"},
-            {"AttributeName": "GSI1SK", "AttributeType": "S"},
-        ],
-        GlobalSecondaryIndexes=[
-            {
-                "IndexName": "OpenGames",
-                "KeySchema": [
-                    {"AttributeName": "GSI1PK", "KeyType": "HASH"},
-                    {"AttributeName": "GSI1SK", "KeyType": "RANGE"},
-                ],
-                "Projection": {"ProjectionType": "ALL"},
-            }
-        ],
-        BillingMode="PAY_PER_REQUEST",
-    )
-    return resource.Table("Texas42")
+from t42.storage.schema import create_table
 
 
 @pytest.fixture
 def table() -> Iterator[Table]:
     with mock_aws():
         resource = boto3.resource("dynamodb", region_name="us-east-1")
-        yield _create_texas42_table(resource)
+        yield create_table(resource, "Texas42")
 
 
 @pytest.fixture(scope="session")
@@ -108,7 +74,7 @@ def real_table(dynamodb_local: str) -> Iterator[Table]:
         aws_access_key_id="local",
         aws_secret_access_key="local",
     )
-    table = _create_texas42_table(resource)
+    table = create_table(resource, "Texas42")
     table.wait_until_exists()
     try:
         yield table
