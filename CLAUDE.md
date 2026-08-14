@@ -247,6 +247,24 @@ Phase 3 (CLI) is complete; bot players are designed in DESIGN.md §13 and sequen
   `render.py`'s `_render_trick` assumed `current_trick` was never `None`, but every response to
   the move that ends a game has exactly that shape - fixed, with a regression test.
 
+Phase 4 (notifications) is underway; see ROADMAP.md for the full 4.1-4.7 breakdown.
+
+- **4.1 (the send channel)** is complete: new top-level package `src/t42/notifications/`, importing
+  only `boto3` (nothing from `t42.storage` or `t42.engine` yet - that permission is reserved for
+  4.5's handler). `sender.py`'s `EmailSender` protocol has three implementations: `ConsoleSender`
+  (the default, printing to stdout), `SesSender` (boto3 `sesv2`, with its client kept untyped the
+  same way `t42.api.deps`'s DynamoDB resource is, avoiding a dependency on `sesv2` stubs), and
+  `tests/notifications/_helpers.py`'s `FakeSender`, the recording fake, following the
+  `FakeTransport` precedent of living in test helpers rather than in the module itself.
+  `get_sender()` picks between them via `T42_EMAIL_SENDER`, mirroring `t42.api.deps`'s env-var
+  shape but inverting its "no silent default" rule on purpose: an unset table name risks writing to
+  production, but an unset sender just prints to stdout instead of emailing, so `console` is a safe
+  default rather than a `RuntimeError`. `messages.py` holds three pure `dict -> (subject, body)`
+  renderers, one per notification kind from DESIGN.md §8 (your turn, game over, invite) - no I/O,
+  the same property `t42/cli/render.py` has for the same reason. Nothing calls these yet; the
+  Streams wiring (4.4) and the handler that decides who to notify and assembles the dict (4.5) are
+  still ahead.
+
 ## Layout
 
 ```
@@ -294,6 +312,9 @@ src/t42/cli/        thin command-line client                  (Phase 3, complete
     context.py      build_client/emit, shared by every command handler (3.4)
     houserules.py   --contracts/--marks/--set flags shared by create-game and rules (3.4)
     commands/       account.py, tables.py, rules.py (3.4); play.py (3.5)
+src/t42/notifications/  the send channel (Phase 4, underway)
+    sender.py       EmailSender protocol; ConsoleSender/SesSender, chosen by env var (4.1)
+    messages.py     pure dict -> (subject, body) renderers, one per notification kind (4.1)
 tests/conftest.py   the `table` (moto) and `real_table` (DynamoDB Local via testcontainers)
                     fixtures, shared by tests/storage/ and tests/api/
 tests/engine/       mirrors the engine modules; test_full_game.py is the Phase 0 milestone demo;
@@ -314,6 +335,8 @@ tests/cli/          mirrors src/t42/cli/; conftest.py's `cli_app_client` (`TestC
                     and the Docker-backed test_cli_integration.py drive `main(argv)` against the
                     real app. test_render.py's leakage proof, test_layering.py and test_main.py
                     round out the suite (3.7)
+tests/notifications/  mirrors src/t42/notifications/; _helpers.py's `FakeSender` records sends
+                    with no network, following the `FakeTransport` precedent (4.1)
 ```
 
 ## Commands
