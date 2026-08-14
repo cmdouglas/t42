@@ -36,11 +36,6 @@ def _command(name: str) -> Command:
     return next(c for c in account.COMMANDS if c.name == name)
 
 
-@pytest.fixture(autouse=True)
-def _config_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
-
-
 def test_register_saves_profile_named_default(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

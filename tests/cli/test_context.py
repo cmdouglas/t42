@@ -22,11 +22,6 @@ def _args(
 
 
 @pytest.fixture(autouse=True)
-def _config_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
-
-
-@pytest.fixture(autouse=True)
 def _fake_transport_factory(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(context, "transport_factory", lambda url: fake_transport({}))
 

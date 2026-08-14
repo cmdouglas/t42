@@ -127,7 +127,9 @@ def _render_hand(hand: list[str] | None) -> str:
     return "  ".join(hand)
 
 
-def _render_trick(trick: dict[str, Any]) -> str:
+def _render_trick(trick: dict[str, Any] | None) -> str:
+    if trick is None:
+        return "  (no hand in progress)"
     plays = trick["plays"]
     if not plays:
         return "  (no plays yet)"
