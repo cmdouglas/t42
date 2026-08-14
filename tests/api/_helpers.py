@@ -52,6 +52,9 @@ class Client:
     def delete(self, path: str) -> Response:
         return self.http.delete(path, headers=self.auth)
 
+    def patch(self, path: str, json: Any = None) -> Response:
+        return self.http.patch(path, json=json, headers=self.auth)
+
     # -- game shortcuts, each asserting the happy path so tests read as intent ------------------
 
     def create_game(self, seat: int = 0, visibility: str = "public", **house_rules: Any) -> str:

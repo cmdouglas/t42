@@ -23,15 +23,23 @@ from t42.engine.house_rules import HouseRules
 from t42.engine.moves import Move
 from t42.engine.projection import project
 from t42.engine.state import GameId, PlayerId
+from t42.notifications import render_verify_contact
 from t42.storage.accounts import (
+    ContactChannel,
+    Player,
+    add_contact,
     authenticate,
+    begin_verification,
+    complete_verification,
     create_player,
     get_player,
     hash_token,
     issue_token,
     list_tokens,
     player_for_username,
+    remove_contact,
     revoke_token,
+    set_contact_notify,
 )
 from t42.storage.errors import (
     AlreadySeated,
@@ -67,10 +75,13 @@ from t42.storage.rule_sets import (
     update_rule_set,
 )
 
-from .deps import BearerToken, CurrentPlayer, IdempotencyKey, TableDep
+from .deps import BearerToken, CurrentPlayer, EmailSenderDep, IdempotencyKey, TableDep
 from .errors import install_error_handlers, invalid_request, not_a_player, not_started
 from .schemas import (
     AuctionRequest,
+    ContactChannelModel,
+    ContactListResponse,
+    ContactResponse,
     CreateGameRequest,
     DeclareContractRequest,
     DeviceResponse,
@@ -90,8 +101,10 @@ from .schemas import (
     RuleSetListResponse,
     RuleSetRequest,
     RuleSetResponse,
+    SetContactNotifyRequest,
     SignInRequest,
     TokenResponse,
+    VerifyContactRequest,
 )
 
 app = FastAPI(
@@ -110,6 +123,12 @@ _CODE_ATTEMPTS = 5
 #: DESIGN.md §6 lists no query parameters for the open-games browse, so this is a fixed cap
 #: rather than a client-tunable one.
 _OPEN_GAMES_LIMIT = 50
+
+
+def _contact(player: Player, address: str) -> ContactChannel:
+    """The one channel a contact-mutating handler just touched, picked back out of the ``Player``
+    those functions return, so the response can echo it without a second read."""
+    return next(c for c in player.contacts if c.address == address)
 
 
 @app.get("/health")
@@ -164,6 +183,54 @@ def me(table: TableDep, player_id: CurrentPlayer) -> PlayerResponse:
         for d in list_tokens(table, player_id)
     ]
     return PlayerResponse.of(player, devices)
+
+
+@app.post("/players/me/contacts", status_code=status.HTTP_201_CREATED)
+def add_contact_channel(
+    table: TableDep, player_id: CurrentPlayer, body: ContactChannelModel
+) -> ContactResponse:
+    player = add_contact(table, player_id, body.kind, body.address)
+    return ContactResponse.of(_contact(player, body.address))
+
+
+@app.get("/players/me/contacts")
+def list_contact_channels(table: TableDep, player_id: CurrentPlayer) -> ContactListResponse:
+    player = get_player(table, player_id)
+    return ContactListResponse(contacts=[ContactResponse.of(c) for c in player.contacts])
+
+
+@app.patch("/players/me/contacts/{address}")
+def mute_contact_channel(
+    table: TableDep, player_id: CurrentPlayer, address: str, body: SetContactNotifyRequest
+) -> ContactResponse:
+    player = set_contact_notify(table, player_id, address, body.notify)
+    return ContactResponse.of(_contact(player, address))
+
+
+@app.delete("/players/me/contacts/{address}", status_code=status.HTTP_204_NO_CONTENT)
+def remove_contact_channel(table: TableDep, player_id: CurrentPlayer, address: str) -> None:
+    remove_contact(table, player_id, address)
+
+
+@app.post("/players/me/contacts/{address}/verification", status_code=status.HTTP_202_ACCEPTED)
+def begin_contact_verification(
+    table: TableDep, player_id: CurrentPlayer, address: str, sender: EmailSenderDep
+) -> None:
+    """Mails a single-use token to ``address`` (DESIGN.md §6.1). This is the one place the API
+    layer sends an email itself, rather than through the Streams-driven notifier (ROADMAP.md
+    4.5): verification has to happen synchronously, since the token it mails is the only proof
+    the player is told to redeem."""
+    token = begin_verification(table, player_id, address)
+    subject, body = render_verify_contact({"address": address, "token": token})
+    sender.send(address, subject, body)
+
+
+@app.post("/contacts/verify", status_code=status.HTTP_204_NO_CONTENT)
+def verify_contact(table: TableDep, body: VerifyContactRequest) -> None:
+    """Deliberately takes no bearer token: the token in the body is itself the credential
+    (DESIGN.md §6.1), and it arrives in an email the player may open on a device that has never
+    signed in."""
+    complete_verification(table, body.token)
 
 
 @app.get("/players/me/games")

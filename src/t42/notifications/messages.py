@@ -12,6 +12,11 @@ same ``{"north_south": int, "east_west": int}`` shape ``t42.engine.projection.pr
 emits, so a caller can pass ``META``'s stored marks straight through. ``render_invite``'s
 ``invited_by`` key does not exist in storage yet - ``invite_player`` currently writes only
 ``{game_id, created_at}`` - 4.5 adds it; this module just assumes it will be present.
+
+``render_verify_contact`` (ROADMAP.md 4.2) is a fourth kind, and the odd one out: it isn't driven
+by a ``PLAYER#`` item transition the way the other three are (4.5), it's sent synchronously from
+the API layer the moment a contact channel is added. The address being verified *is* the
+recipient, so unlike the other three there is no ``recipient_username`` to greet.
 """
 
 from __future__ import annotations
@@ -47,4 +52,11 @@ def render_invite(data: dict[str, Any]) -> tuple[str, str]:
         f"Hi {data['recipient_username']},\n\n"
         f"{data['invited_by']} has invited you to game {data['game_id']}."
     )
+    return subject, body
+
+
+def render_verify_contact(data: dict[str, Any]) -> tuple[str, str]:
+    """Expects: address, token."""
+    subject = "Verify this contact address"
+    body = f"To verify {data['address']}, run:\n\n    t42 contact confirm {data['token']}\n"
     return subject, body

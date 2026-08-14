@@ -143,7 +143,7 @@ def test_contacts_are_channels_and_are_optional(client: TestClient) -> None:
     without = Client.register(client, "bob")
 
     assert with_email.http.get("/players/me", headers=with_email.auth).json()["contacts"] == [
-        {"kind": "email", "address": "a@example.com", "verified": False}
+        {"kind": "email", "address": "a@example.com", "verified": False, "notify": True}
     ]
     assert without.http.get("/players/me", headers=without.auth).json()["contacts"] == []
 

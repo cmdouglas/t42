@@ -1,22 +1,36 @@
-"""Accounts and auth tokens (ROADMAP.md 2.1)."""
+"""Accounts and auth tokens (ROADMAP.md 2.1, 4.2)."""
 
 from __future__ import annotations
+
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from mypy_boto3_dynamodb.service_resource import Table
 
 from t42.storage.accounts import (
     ContactChannel,
+    add_contact,
     authenticate,
+    begin_verification,
+    complete_verification,
     create_player,
     get_player,
     hash_token,
     issue_token,
     list_tokens,
     player_for_token,
+    remove_contact,
     revoke_token,
+    set_contact_notify,
 )
-from t42.storage.errors import InvalidCredentials, InvalidToken, UsernameTaken
+from t42.storage.errors import (
+    ContactAlreadyExists,
+    ContactNotFound,
+    InvalidCredentials,
+    InvalidToken,
+    InvalidVerificationToken,
+    UsernameTaken,
+)
 
 
 def test_create_player_round_trips_through_get_player(table: Table) -> None:
@@ -157,3 +171,145 @@ def test_revoking_twice_is_a_no_op(table: Table) -> None:
     revoke_token(table, player.player_id, digest)
 
     assert list_tokens(table, player.player_id) == ()
+
+
+# --------------------------------------------------------------------- contact channels (4.2)
+
+
+def test_notify_defaults_to_true_and_needs_no_migration(table: Table) -> None:
+    player = create_player(table, "charlie", "pw", [ContactChannel("email", "c@example.com")])
+
+    assert get_player(table, player.player_id).contacts == (
+        ContactChannel("email", "c@example.com", verified=False, notify=True),
+    )
+
+    # A pre-4.2 item has no "notify" key at all - simulate one directly and confirm it still
+    # decodes as notify=True rather than raising a KeyError.
+    table.update_item(
+        Key={"PK": f"PLAYER#{player.player_id}", "SK": "PROFILE"},
+        UpdateExpression="SET contacts = :c",
+        ExpressionAttributeValues={
+            ":c": [{"kind": "email", "address": "c@example.com", "verified": False}]
+        },
+    )
+    assert get_player(table, player.player_id).contacts == (
+        ContactChannel("email", "c@example.com", verified=False, notify=True),
+    )
+
+
+def test_add_contact_appends_a_new_unverified_unmuted_channel(table: Table) -> None:
+    player = create_player(table, "charlie", "pw")
+
+    updated = add_contact(table, player.player_id, "email", "c@example.com")
+
+    assert updated.contacts == (ContactChannel("email", "c@example.com"),)
+    assert get_player(table, player.player_id).contacts == updated.contacts
+
+
+def test_add_contact_rejects_a_duplicate_address(table: Table) -> None:
+    player = create_player(table, "charlie", "pw", [ContactChannel("email", "c@example.com")])
+
+    with pytest.raises(ContactAlreadyExists):
+        add_contact(table, player.player_id, "email", "c@example.com")
+
+
+def test_remove_contact_removes_only_the_matching_address(table: Table) -> None:
+    player = create_player(
+        table,
+        "charlie",
+        "pw",
+        [ContactChannel("email", "c@example.com"), ContactChannel("email", "other@example.com")],
+    )
+
+    updated = remove_contact(table, player.player_id, "c@example.com")
+
+    assert updated.contacts == (ContactChannel("email", "other@example.com"),)
+
+
+def test_remove_contact_rejects_an_unknown_address(table: Table) -> None:
+    player = create_player(table, "charlie", "pw")
+
+    with pytest.raises(ContactNotFound):
+        remove_contact(table, player.player_id, "nobody@example.com")
+
+
+def test_set_contact_notify_mutes_only_the_matching_channel(table: Table) -> None:
+    player = create_player(
+        table,
+        "charlie",
+        "pw",
+        [ContactChannel("email", "c@example.com"), ContactChannel("email", "other@example.com")],
+    )
+
+    updated = set_contact_notify(table, player.player_id, "c@example.com", False)
+
+    contacts = {c.address: c for c in updated.contacts}
+    assert contacts["c@example.com"].notify is False
+    assert contacts["other@example.com"].notify is True
+
+
+def test_set_contact_notify_rejects_an_unknown_address(table: Table) -> None:
+    player = create_player(table, "charlie", "pw")
+
+    with pytest.raises(ContactNotFound):
+        set_contact_notify(table, player.player_id, "nobody@example.com", False)
+
+
+def test_verification_round_trip_marks_the_channel_verified(table: Table) -> None:
+    player = create_player(table, "charlie", "pw", [ContactChannel("email", "c@example.com")])
+
+    token = begin_verification(table, player.player_id, "c@example.com")
+    complete_verification(table, token)
+
+    assert get_player(table, player.player_id).contacts == (
+        ContactChannel("email", "c@example.com", verified=True),
+    )
+
+
+def test_begin_verification_rejects_an_unknown_address(table: Table) -> None:
+    player = create_player(table, "charlie", "pw")
+
+    with pytest.raises(ContactNotFound):
+        begin_verification(table, player.player_id, "nobody@example.com")
+
+
+def test_an_unissued_verification_token_is_rejected(table: Table) -> None:
+    with pytest.raises(InvalidVerificationToken):
+        complete_verification(table, "not-a-real-token")
+
+
+def test_a_verification_token_is_single_use(table: Table) -> None:
+    player = create_player(table, "charlie", "pw", [ContactChannel("email", "c@example.com")])
+    token = begin_verification(table, player.player_id, "c@example.com")
+
+    complete_verification(table, token)
+
+    with pytest.raises(InvalidVerificationToken):
+        complete_verification(table, token)
+
+
+def test_an_expired_verification_token_is_rejected_and_still_consumed(table: Table) -> None:
+    player = create_player(table, "charlie", "pw", [ContactChannel("email", "c@example.com")])
+    start = datetime(2026, 1, 1, tzinfo=UTC)
+    token = begin_verification(table, player.player_id, "c@example.com", now=lambda: start)
+
+    with pytest.raises(InvalidVerificationToken):
+        complete_verification(table, token, now=lambda: start + timedelta(hours=25))
+
+    # Single-use even when rejected for expiry: a retry must not somehow succeed.
+    with pytest.raises(InvalidVerificationToken):
+        complete_verification(table, token, now=lambda: start)
+
+    assert get_player(table, player.player_id).contacts == (
+        ContactChannel("email", "c@example.com", verified=False),
+    )
+
+
+def test_verifying_a_channel_removed_after_the_token_was_minted_is_a_no_op(table: Table) -> None:
+    player = create_player(table, "charlie", "pw", [ContactChannel("email", "c@example.com")])
+    token = begin_verification(table, player.player_id, "c@example.com")
+
+    remove_contact(table, player.player_id, "c@example.com")
+    complete_verification(table, token)  # does not raise
+
+    assert get_player(table, player.player_id).contacts == ()

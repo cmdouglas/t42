@@ -16,15 +16,26 @@ from mypy_boto3_dynamodb.service_resource import Table
 
 from t42.api.app import app
 from t42.api.deps import get_table
+from t42.notifications import get_sender
 
+from ..notifications._helpers import FakeSender
 from ._helpers import Client
 
 
 @pytest.fixture
-def client(table: Table) -> Iterator[TestClient]:
-    """The app, wired to a per-test moto table through FastAPI's dependency overrides - the
-    reason ``get_table`` is a dependency rather than a module-level handle."""
+def fake_sender() -> FakeSender:
+    """The recording ``EmailSender`` every test's ``client`` sends through - ROADMAP.md 4.2's
+    contact-verification endpoint is the first handler that actually sends mail."""
+    return FakeSender()
+
+
+@pytest.fixture
+def client(table: Table, fake_sender: FakeSender) -> Iterator[TestClient]:
+    """The app, wired to a per-test moto table and a recording sender through FastAPI's
+    dependency overrides - the reason ``get_table``/``get_sender`` are dependencies rather than
+    module-level handles."""
     app.dependency_overrides[get_table] = lambda: table
+    app.dependency_overrides[get_sender] = lambda: fake_sender
     with TestClient(app) as test_client:
         yield test_client
     app.dependency_overrides.clear()

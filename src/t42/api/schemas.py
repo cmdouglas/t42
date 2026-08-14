@@ -86,10 +86,43 @@ class DeviceResponse(BaseModel):
     last_used_at: str
 
 
+class ContactResponse(BaseModel):
+    kind: str
+    address: str
+    verified: bool
+    notify: bool
+
+    @classmethod
+    def of(cls, contact: ContactChannel) -> ContactResponse:
+        return cls(
+            kind=contact.kind,
+            address=contact.address,
+            verified=contact.verified,
+            notify=contact.notify,
+        )
+
+
+class ContactListResponse(BaseModel):
+    contacts: list[ContactResponse]
+
+
+class SetContactNotifyRequest(_Strict):
+    """The ``PATCH /players/me/contacts/{address}`` body - the mute toggle (DESIGN.md §6.1)."""
+
+    notify: bool
+
+
+class VerifyContactRequest(_Strict):
+    """The ``POST /contacts/verify`` body. The token is the whole credential (DESIGN.md §6.1),
+    so this endpoint takes no other identifying information."""
+
+    token: str
+
+
 class PlayerResponse(BaseModel):
     player_id: PlayerId
     username: str
-    contacts: list[dict[str, Any]]
+    contacts: list[ContactResponse]
     created_at: str
     devices: list[DeviceResponse]
 
@@ -98,10 +131,7 @@ class PlayerResponse(BaseModel):
         return cls(
             player_id=player.player_id,
             username=player.username,
-            contacts=[
-                {"kind": c.kind, "address": c.address, "verified": c.verified}
-                for c in player.contacts
-            ],
+            contacts=[ContactResponse.of(c) for c in player.contacts],
             created_at=player.created_at,
             devices=devices,
         )

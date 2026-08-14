@@ -133,3 +133,30 @@ class NotInvited(StorageError):
     def __init__(self, game_id: str) -> None:
         super().__init__(f"game {game_id!r} is invite-only and you have not been invited")
         self.game_id = game_id
+
+
+class ContactNotFound(StorageError):
+    """No contact channel with this address exists on the player's profile (ROADMAP.md 4.2)."""
+
+    def __init__(self, address: str) -> None:
+        super().__init__(f"no contact channel found with address {address!r}")
+        self.address = address
+
+
+class ContactAlreadyExists(StorageError):
+    """``add_contact`` was called with an address already registered. Every other contact
+    operation names a channel by its address, so duplicates would make "the" channel ambiguous
+    (ROADMAP.md 4.2)."""
+
+    def __init__(self, address: str) -> None:
+        super().__init__(f"a contact channel already exists with address {address!r}")
+        self.address = address
+
+
+class InvalidVerificationToken(StorageError):
+    """The verification token was never issued, has already been redeemed, or has expired
+    (ROADMAP.md 4.2). The token is itself the credential (DESIGN.md §6.1), so this carries no
+    detail about which of the three it was."""
+
+    def __init__(self) -> None:
+        super().__init__("the supplied verification token is not valid")

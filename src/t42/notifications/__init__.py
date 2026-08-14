@@ -9,12 +9,15 @@ ROADMAP.md 4.7).
 ``sender`` is the transport - an ``EmailSender`` protocol with a console and an SES
 implementation, chosen by environment variable. ``messages`` is pure content - a
 ``dict -> (subject, body)`` renderer per notification kind. Nothing in this package yet decides
-*who* to notify or *when*; that is ROADMAP.md 4.5's handler, built on top of both.
+*who* to notify or *when* for the three ``PLAYER#``-item-driven kinds; that is ROADMAP.md 4.5's
+handler, built on top of both. Contact verification (4.2) is the exception: it is sent
+synchronously from the API layer, not stream-driven, so ``render_verify_contact`` already has a
+real caller.
 """
 
 from __future__ import annotations
 
-from .messages import render_game_over, render_invite, render_your_turn
+from .messages import render_game_over, render_invite, render_verify_contact, render_your_turn
 from .sender import (
     EMAIL_SENDER_ENV,
     SES_FROM_ADDRESS_ENV,
@@ -33,5 +36,6 @@ __all__ = [
     "get_sender",
     "render_game_over",
     "render_invite",
+    "render_verify_contact",
     "render_your_turn",
 ]

@@ -261,9 +261,25 @@ Phase 4 (notifications) is underway; see ROADMAP.md for the full 4.1-4.7 breakdo
   production, but an unset sender just prints to stdout instead of emailing, so `console` is a safe
   default rather than a `RuntimeError`. `messages.py` holds three pure `dict -> (subject, body)`
   renderers, one per notification kind from DESIGN.md §8 (your turn, game over, invite) - no I/O,
-  the same property `t42/cli/render.py` has for the same reason. Nothing calls these yet; the
-  Streams wiring (4.4) and the handler that decides who to notify and assembles the dict (4.5) are
-  still ahead.
+  the same property `t42/cli/render.py` has for the same reason. Nothing called these yet at the
+  time; the Streams wiring (4.4) and the handler that decides who to notify and assembles the
+  dict (4.5) are still ahead.
+- **4.2 (contact channels and email verification)** is complete: `ContactChannel` gains
+  `notify: bool = True`, decoded through `.get("notify", True)` so pre-4.2 items need no
+  migration. `accounts.py` gains `add_contact`/`remove_contact`/`set_contact_notify` (a
+  read-modify-write over the `contacts` list on `PROFILE`, deliberately not conditioned on the
+  list being unchanged - contention between a player's own devices is rare and low-stakes, unlike
+  game state) and `begin_verification`/`complete_verification`, which mint and redeem a
+  single-use `VERIFY#<sha256(token)>/TOKEN` item mirroring the bearer-token shape but with no
+  reverse index, since nothing needs to list a player's pending verifications. A verification
+  token is deleted the moment it's looked at, whether or not it turns out to be expired, so it can
+  never be replayed. This is `t42.notifications`'s first real caller: `POST
+  /players/me/contacts/{address}/verification` sends synchronously through a new `EmailSenderDep`
+  (mirroring `TableDep`'s override shape) using a fourth renderer, `render_verify_contact` - the
+  odd one out in `messages.py`, since it isn't driven by a `PLAYER#` item transition the way the
+  three from 4.1 are. `POST /contacts/verify` takes no bearer token at all, the same shape
+  `register`/`sign_in` already use for working signed-out, since the token in the body is itself
+  the credential (DESIGN.md §6.1).
 
 ## Layout
 
@@ -291,14 +307,15 @@ src/t42/storage/    DynamoDB event log + materialized state   (Phases 1, 2 and 2
     repository.py   start_game/get_state/append/find_request, GameStatus (1.3, 1.4, 2.2)
     lobby.py        create_pending_game/join_seat/list_games_for_player/
                      list_open_games, Visibility                  (2.2, 2.7.2, 2.7.3)
-    accounts.py     players, passwords, per-device bearer tokens         (2.1, 2.7.2)
+    accounts.py     players, passwords, per-device bearer tokens,
+                     contact channels + email verification    (2.1, 2.7.2, 4.2)
     rule_sets.py    named HouseRules saved under a player's own partition (2.7.1)
     invites.py      GAME#/INVITE# + PLAYER#/INVITE# permission-grant CRUD (2.7.2)
     errors.py       GameNotFound, VersionConflict, SeatTaken, InvalidToken, ...
     schema.py       create_table(dynamodb, name); `python -m t42.storage.schema` (3.6)
-src/t42/api/        FastAPI app behind Mangum                 (Phases 2 and 2.7, complete)
-    app.py          the twenty-one endpoints; `_submit` is the one write path for moves (2.4)
-    deps.py         table handle and the bearer-token dependency, both overridable (2.4)
+src/t42/api/        FastAPI app behind Mangum                 (Phases 2, 2.7 and 4.2, ongoing)
+    app.py          the twenty-seven endpoints; `_submit` is the one write path for moves (2.4)
+    deps.py         table/sender handles and the bearer-token dependency, all overridable (2.4, 4.2)
     schemas.py      pydantic request/response bodies; the bid body is discriminated (2.3)
     errors.py       domain exception -> status code + machine-readable code          (2.3)
     lambda_handler.py  `Mangum(app)`, nothing else                                   (2.6)
@@ -314,7 +331,8 @@ src/t42/cli/        thin command-line client                  (Phase 3, complete
     commands/       account.py, tables.py, rules.py (3.4); play.py (3.5)
 src/t42/notifications/  the send channel (Phase 4, underway)
     sender.py       EmailSender protocol; ConsoleSender/SesSender, chosen by env var (4.1)
-    messages.py     pure dict -> (subject, body) renderers, one per notification kind (4.1)
+    messages.py     pure dict -> (subject, body) renderers, one per notification kind
+                     (4.1: turn/game-over/invite; 4.2 adds render_verify_contact)
 tests/conftest.py   the `table` (moto) and `real_table` (DynamoDB Local via testcontainers)
                     fixtures, shared by tests/storage/ and tests/api/
 tests/engine/       mirrors the engine modules; test_full_game.py is the Phase 0 milestone demo;
@@ -323,9 +341,12 @@ tests/engine/       mirrors the engine modules; test_full_game.py is the Phase 0
                     the codec, replay and repository round-trip tests
 tests/storage/      mirrors src/t42/storage/; _helpers.py's `started_game` reaches a dealt game
                     the way a real one is reached, through the lobby rather than around it
-tests/api/          contract tests over FastAPI's in-process TestClient, with `table` injected
-                    via `app.dependency_overrides`; _helpers.py's `Client`/`play_until` drive a
-                    whole game over HTTP, and every test goes through the public API only
+tests/api/          contract tests over FastAPI's in-process TestClient, with `table` and (4.2)
+                    `get_sender` injected via `app.dependency_overrides`; _helpers.py's
+                    `Client`/`play_until` drive a whole game over HTTP, and every test goes
+                    through the public API only. test_contacts.py (4.2) covers contact
+                    channels and verification, including redeeming a token with no bearer
+                    token at all - proving `POST /contacts/verify` really works signed-out
 tests/cli/          mirrors src/t42/cli/; conftest.py's `cli_app_client` (`TestClient(app)` + the
                     moto `table` override) and `_config_home` are shared by every file here.
                     _helpers.py's `FakeTransport` fakes `t42.cli.api.Transport` with no network,
