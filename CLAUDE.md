@@ -168,8 +168,8 @@ surface:
   `api/app.py` on purpose - Starlette matches routes in registration order, and the path parameter
   would otherwise swallow the literal `open` segment.
 
-Phase 3 (CLI) is underway; bot players are designed in DESIGN.md §13 and sequenced last. 3.0
-through 3.3 are complete:
+Phase 3 (CLI) is underway; bot players are designed in DESIGN.md §13 and sequenced last, as Phase
+6. 3.0 through 3.6 are complete, leaving only 3.7 (tests) to close out the phase:
 
 - **3.0** closed the gap the CLI's command set surfaces before any CLI code exists: an invite's
   player id is handed back once, in a response no client keeps, so `t42 uninvite` had nothing to
@@ -197,6 +197,35 @@ through 3.3 are complete:
   literal `t42 ...` command that would submit it, which is formatting the server's own answer, not
   deriving anything - the same "client never decides" rule 3.1-3.2 already followed for turn order
   and legality.
+- **3.4 (account and table commands)** is complete: the thirteen commands from DESIGN.md §7 that
+  aren't play commands - `register`, `login`, `logout`, `whoami`; `rules save|list|show|replace|
+  delete`; `create-game`, `join`, `open`, `invite`, `invited`, `uninvite`, `decline`, `invites` -
+  wired onto `main.py`'s dispatch table. Two helpers back most of them: `context.py`'s
+  `build_client`/`emit` turn `--profile`/`T42_PROFILE` into an authenticated `ApiClient` and give
+  every handler the `--json`-vs-`render.py` split; `houserules.py`'s `add_house_rule_flags`/
+  `house_rules_body` are shared by `create-game` and `rules save`/`replace` and only set a body key
+  when its flag was actually given, so the server's own `HouseRulesRequest` defaults apply rather
+  than the CLI restating one. `command.py`'s `Command` dataclass (`name`/`help`/`configure`/
+  `handler`) is what `t42.cli.commands.COMMANDS` is built from, split out from `main.py` so the
+  `commands` package can build values of it without a circular import back into `main.py`.
+- **3.5 (play commands)** is complete: `status`, `games`, `bid`, `declare`, `play` - the commands
+  that actually run a game. `bid`'s five spellings (a points bid, `pass`, an `N-marks` bid with an
+  optional `--contract`, `confirm`, `decline`) all dispatch onto the one `kind`-discriminated
+  `/bid` body (DESIGN.md §6); `confirm`/`decline` are both `CONFIRM_BID` with `accept=True`/
+  `False`, since there is no `DECLINE` kind on the wire. `declare`'s `trump=<suit>`/`trump=none`
+  token and `play`'s `--declare` flag both parse through a new `parse_suit`, the input-side
+  counterpart to `render.py`'s own suit-name table - duplicated rather than shared, the same
+  tradeoff `houserules.py`'s seat-name table already made (DESIGN.md §7).
+- **3.6 (running it locally)** is complete, and is the one piece of non-CLI code in the phase: the
+  `Texas42` table definition, previously reachable only through a pytest fixture, is now
+  `src/t42/storage/schema.py`'s `create_table(dynamodb, name)`, plus a
+  `python -m t42.storage.schema` entry point for creating it outside a test run. The `table` (moto)
+  and `real_table` (DynamoDB Local) fixtures in `tests/conftest.py` both build from it now, the
+  same "one shared definition" property 2.7.3 wanted when it put the `OpenGames` GSI in a shared
+  helper, just widened to include a local run. The README's local-run instructions use the entry
+  point too, in place of an inline snippet that had drifted out of sync with the real schema and
+  was missing the `OpenGames` GSI. It lives under `t42.storage`, not a `t42 dev` subcommand,
+  because `t42.cli` may not import boto3 - the layering rule 3.7 checks by test.
 
 ## Layout
 
@@ -228,13 +257,23 @@ src/t42/storage/    DynamoDB event log + materialized state   (Phases 1, 2 and 2
     rule_sets.py    named HouseRules saved under a player's own partition (2.7.1)
     invites.py      GAME#/INVITE# + PLAYER#/INVITE# permission-grant CRUD (2.7.2)
     errors.py       GameNotFound, VersionConflict, SeatTaken, InvalidToken, ...
+    schema.py       create_table(dynamodb, name); `python -m t42.storage.schema` (3.6)
 src/t42/api/        FastAPI app behind Mangum                 (Phases 2 and 2.7, complete)
     app.py          the twenty-one endpoints; `_submit` is the one write path for moves (2.4)
     deps.py         table handle and the bearer-token dependency, both overridable (2.4)
     schemas.py      pydantic request/response bodies; the bid body is discriminated (2.3)
     errors.py       domain exception -> status code + machine-readable code          (2.3)
     lambda_handler.py  `Mangum(app)`, nothing else                                   (2.6)
-src/t42/cli/        thin command-line client                  (Phase 3, not created)
+src/t42/cli/        thin command-line client                  (Phase 3, 3.0-3.6 complete)
+    main.py         argparse + dispatch; `main(argv) -> int` returns rather than raises (3.1)
+    config.py       ~/.config/t42/config.json, named profiles, 0600 (3.1)
+    api.py          ApiClient/Transport/HttpTransport, the `{"error": ...}` envelope (3.2)
+    errors.py       DESIGN.md §7.2's code -> exit-status table (3.2)
+    render.py       pure dict -> str renderers, incl. legal moves as runnable commands (3.3)
+    command.py      the `Command` shape `commands.COMMANDS` is built from (3.4)
+    context.py      build_client/emit, shared by every command handler (3.4)
+    houserules.py   --contracts/--marks/--set flags shared by create-game and rules (3.4)
+    commands/       account.py, tables.py, rules.py (3.4); play.py (3.5)
 tests/conftest.py   the `table` (moto) and `real_table` (DynamoDB Local via testcontainers)
                     fixtures, shared by tests/storage/ and tests/api/
 tests/engine/       mirrors the engine modules; test_full_game.py is the Phase 0 milestone demo;
@@ -246,6 +285,12 @@ tests/storage/      mirrors src/t42/storage/; _helpers.py's `started_game` reach
 tests/api/          contract tests over FastAPI's in-process TestClient, with `table` injected
                     via `app.dependency_overrides`; _helpers.py's `Client`/`play_until` drive a
                     whole game over HTTP, and every test goes through the public API only
+tests/cli/          mirrors src/t42/cli/; _helpers.py's `FakeTransport` fakes `t42.cli.api.Transport`
+                    with no network, letting test_commands_*.py exercise main(argv) end to end;
+                    test_render.py and test_main.py round out 3.1-3.6 - 3.7 still owes pointing
+                    `context.transport_factory` at `TestClient(app)` in-process, a test_layering.py
+                    (no `t42.engine`/`t42.storage`/boto3 import under `t42.cli`), and the
+                    Docker-backed tests/cli/test_cli_integration.py four-profile smoke test
 ```
 
 ## Commands
