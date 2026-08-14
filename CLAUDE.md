@@ -264,6 +264,13 @@ uv run ruff format .           # format
 Run `pytest`, `mypy`, `ruff check` and `ruff format` before considering a change done; CI runs the
 same set, plus the integration suite as its own step.
 
+## Workflow
+
+Small fixes and documentation-only changes (typos, a `CLAUDE.md`/`DESIGN.md`/`ROADMAP.md` update, a
+one-line bug fix) can be committed and pushed directly to `main`. Anything larger, and especially
+anything that changes production behavior (a new module, a new endpoint, a schema or event-shape
+change, anything under `src/`) goes to a branch with a pull request instead.
+
 ## Invariants
 
 These are the rules that keep the design working. Breaking one is a design change, not a detail.
