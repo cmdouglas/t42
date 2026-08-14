@@ -19,13 +19,15 @@ ROADMAP.md 3.2 builds next. It is the table ROADMAP.md 3.4 and 3.5 append real c
 from __future__ import annotations
 
 import argparse
+import json as jsonlib
 import os
 import sys
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import NoReturn
 
-from t42.cli import config
+from t42.cli import config, errors
+from t42.cli.api import ApiError
 
 
 class _ExitSignal(Exception):
@@ -71,6 +73,16 @@ def build_parser(commands: Sequence[Command] = _COMMANDS) -> _ArgumentParser:
     return parser
 
 
+def _print_error(json_mode: bool, code: str | None, message: str) -> None:
+    if json_mode:
+        error: dict[str, str] = {"message": message}
+        if code is not None:
+            error["code"] = code
+        print(jsonlib.dumps({"error": error}), file=sys.stderr)
+    else:
+        print(f"error: {message}", file=sys.stderr)
+
+
 def _run(argv: list[str] | None, commands: Sequence[Command]) -> int:
     parser = build_parser(commands)
     try:
@@ -79,7 +91,14 @@ def _run(argv: list[str] | None, commands: Sequence[Command]) -> int:
         return exc.status
 
     by_name = {command.name: command for command in commands}
-    return by_name[args.command].handler(args)
+    try:
+        return by_name[args.command].handler(args)
+    except ApiError as exc:
+        _print_error(args.json, exc.code, exc.message)
+        return errors.exit_code_for(exc.code)
+    except Exception as exc:  # network failure, or anything else unexpected
+        _print_error(args.json, None, str(exc))
+        return 1
 
 
 def main(argv: list[str] | None = None) -> int:

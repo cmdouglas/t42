@@ -4,6 +4,7 @@ import argparse
 
 import pytest
 
+from t42.cli.api import ApiError
 from t42.cli.main import Command, _run, main
 
 
@@ -138,3 +139,60 @@ def test_global_flag_after_the_subcommand_is_rejected() -> None:
     command = _fake_command("ping", lambda args: 0)
 
     assert _run(["ping", "--profile", "north"], (command,)) == 2
+
+
+def test_api_error_maps_to_its_documented_exit_code() -> None:
+    def handler(args: argparse.Namespace) -> int:
+        raise ApiError(409, "OUT_OF_TURN", "west is not the player to move")
+
+    command = _fake_command("play", handler)
+
+    assert _run(["play"], (command,)) == 5
+
+
+def test_api_error_prints_message_to_stderr(capsys: pytest.CaptureFixture[str]) -> None:
+    def handler(args: argparse.Namespace) -> int:
+        raise ApiError(404, "GAME_NOT_FOUND", "no such game")
+
+    command = _fake_command("status", handler)
+
+    _run(["status"], (command,))
+
+    captured = capsys.readouterr()
+    assert "no such game" in captured.err
+
+
+def test_api_error_with_json_flag_prints_the_envelope(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    def handler(args: argparse.Namespace) -> int:
+        raise ApiError(404, "GAME_NOT_FOUND", "no such game")
+
+    command = _fake_command("status", handler)
+
+    _run(["--json", "status"], (command,))
+
+    captured = capsys.readouterr()
+    assert '"code": "GAME_NOT_FOUND"' in captured.err
+
+
+def test_unrecognised_error_code_exits_one() -> None:
+    def handler(args: argparse.Namespace) -> int:
+        raise ApiError(500, "SOMETHING_NEW", "the server grew a new code")
+
+    command = _fake_command("status", handler)
+
+    assert _run(["status"], (command,)) == 1
+
+
+def test_unexpected_exception_exits_one(capsys: pytest.CaptureFixture[str]) -> None:
+    def handler(args: argparse.Namespace) -> int:
+        raise ConnectionError("connection refused")
+
+    command = _fake_command("status", handler)
+
+    status = _run(["status"], (command,))
+
+    captured = capsys.readouterr()
+    assert status == 1
+    assert "connection refused" in captured.err

@@ -1085,6 +1085,9 @@ dependencies = [
 ]
 
 [package.optional-dependencies]
+cli = [
+    { name = "httpx2" },
+]
 dev = [
     { name = "boto3-stubs", extra = ["dynamodb"] },
     { name = "httpx" },
@@ -1104,6 +1107,7 @@ requires-dist = [
     { name = "boto3-stubs", extras = ["dynamodb"], marker = "extra == 'dev'", specifier = ">=1.35" },
     { name = "fastapi", specifier = ">=0.141.1" },
     { name = "httpx", marker = "extra == 'dev'", specifier = ">=0.28.1" },
+    { name = "httpx2", marker = "extra == 'cli'", specifier = ">=2.10.0" },
     { name = "httpx2", marker = "extra == 'dev'", specifier = ">=2.10.0" },
     { name = "hypothesis", marker = "extra == 'dev'", specifier = ">=6.112" },
     { name = "mangum", specifier = ">=0.21.0" },
@@ -1114,7 +1118,7 @@ requires-dist = [
     { name = "testcontainers", marker = "extra == 'dev'", specifier = ">=4.8" },
     { name = "uvicorn", marker = "extra == 'dev'", specifier = ">=0.52.3" },
 ]
-provides-extras = ["dev"]
+provides-extras = ["cli", "dev"]
 
 [[package]]
 name = "testcontainers"
