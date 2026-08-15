@@ -10,6 +10,10 @@ The ``OpenGames`` GSI is the table's only secondary index: a sparse index on
 ``GSI1PK``/``GSI1SK``, populated only by a public ``WAITING`` game's ``META`` item, projecting
 ``ALL`` so a browse row needs no follow-up read.
 
+The table also has a DynamoDB Stream enabled, with both images so a consumer sees a *transition*
+rather than just a current state (ROADMAP.md 4.4) - every rule Phase 4.5's notifier applies is a
+transition (``is_my_turn`` false to true, and so on), and old images are what make that visible.
+
 This module - not a ``t42 dev`` CLI subcommand - is where local table creation lives, because
 ``t42.cli`` may not import boto3 (ROADMAP.md 3.7 has a layering test enforcing that). Run it with::
 
@@ -60,6 +64,7 @@ def create_table(dynamodb: DynamoDBServiceResource, name: str) -> Table:
             }
         ],
         BillingMode="PAY_PER_REQUEST",
+        StreamSpecification={"StreamEnabled": True, "StreamViewType": "NEW_AND_OLD_IMAGES"},
     )
     return dynamodb.Table(name)
 
