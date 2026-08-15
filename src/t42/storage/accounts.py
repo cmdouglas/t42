@@ -1,6 +1,6 @@
-"""Player accounts and auth tokens (ROADMAP.md 2.1, 4.2, DESIGN.md §6.1).
+"""Player accounts and auth tokens (ROADMAP.md 2.1, 4.2, 4.3, DESIGN.md §6.1).
 
-Five item types in the same single table as the games (DESIGN.md §4.1), so no GSI and no second
+Six item types in the same single table as the games (DESIGN.md §4.1), so no GSI and no second
 table are needed:
 
 ``PLAYER#<id> / PROFILE``
@@ -17,6 +17,11 @@ table are needed:
     A pending contact-channel verification: player id, address, expires_at. Unlike a bearer
     token, nothing needs to list a player's pending verifications, so there is no reverse index -
     one item, minted by :func:`begin_verification` and consumed by :func:`complete_verification`.
+``RESET#<sha256(token)> / TOKEN``
+    A pending password reset: player id, expires_at (DESIGN.md §4.1). Unlike ``VERIFY#`` it
+    carries no ``address`` - it is tied to the player, not a channel - and minting it (
+    :func:`begin_password_reset`) is not itself proof of anything; redeeming it
+    (:func:`complete_password_reset`) is what grants a new password and revokes every device.
 
 **Two hashes, on purpose.** A password is low-entropy and human-chosen, so it gets ``scrypt``,
 which is deliberately slow and memory-hard. A token is 32 bytes from ``secrets``, so brute force
@@ -53,9 +58,11 @@ from .errors import (
     ContactAlreadyExists,
     ContactNotFound,
     InvalidCredentials,
+    InvalidResetToken,
     InvalidToken,
     InvalidVerificationToken,
     PlayerNotFound,
+    StorageError,
     UsernameTaken,
 )
 
@@ -71,6 +78,10 @@ _TOKEN_BYTES: Final = 32
 _PLAYER_ID_BYTES: Final = 12
 #: How long a mailed verification token stays redeemable (ROADMAP.md 4.2).
 _VERIFICATION_TTL: Final = timedelta(hours=24)
+#: How long a mailed password-reset token stays redeemable (ROADMAP.md 4.3). Shorter than
+#: verification's: redeeming this one grants a new password outright, a higher-stakes credential
+#: than proving address ownership.
+_RESET_TTL: Final = timedelta(hours=1)
 
 
 def _utcnow() -> datetime:
@@ -91,6 +102,10 @@ def _token_pk(token_hash: str) -> str:
 
 def _verify_pk(token_hash: str) -> str:
     return f"VERIFY#{token_hash}"
+
+
+def _reset_pk(token_hash: str) -> str:
+    return f"RESET#{token_hash}"
 
 
 def _token_sk(token_hash: str) -> str:
@@ -527,6 +542,56 @@ def set_contact_notify(table: Table, player_id: PlayerId, address: str, notify: 
     return _player_from_item({**item, "contacts": _encode_contacts(new_contacts)})
 
 
+def _mint_single_use_token(
+    table: Table,
+    pk_for: Callable[[str], str],
+    ttl: timedelta,
+    fields: Mapping[str, Any],
+    *,
+    now: Callable[[], datetime],
+) -> str:
+    """Mints a single-use, expiring token under the partition key ``pk_for`` builds from its
+    hash, storing ``fields`` alongside ``expires_at``. Returns the plaintext - the only time it
+    exists outside the caller. Shared by :func:`begin_verification` and
+    :func:`begin_password_reset`, which differ only in ``pk_for``, ``ttl`` and which fields ride
+    along on the item."""
+    token = secrets.token_urlsafe(_TOKEN_BYTES)
+    digest = hash_token(token)
+    table.put_item(
+        Item={
+            "PK": pk_for(digest),
+            "SK": "TOKEN",
+            "expires_at": (now() + ttl).isoformat(),
+            **fields,
+        }
+    )
+    return token
+
+
+def _redeem_single_use_token(
+    table: Table,
+    pk_for: Callable[[str], str],
+    token: str,
+    invalid: type[StorageError],
+    *,
+    now: Callable[[], datetime],
+) -> dict[str, Any]:
+    """Deletes and returns the item a matching :func:`_mint_single_use_token` call stored,
+    whether or not it turns out to have expired - so it can never be replayed (DESIGN.md §6.1:
+    "mails a single-use token"). Raises ``invalid`` if the token was never issued, has already
+    been redeemed, or has expired. Shared by :func:`complete_verification` and
+    :func:`complete_password_reset`, which differ only in ``pk_for``, the exception raised, and
+    what they do with the fields on the returned item."""
+    key = {"PK": pk_for(hash_token(token)), "SK": "TOKEN"}
+    item = table.get_item(Key=key).get("Item")
+    if item is None:
+        raise invalid
+    table.delete_item(Key=key)
+    if as_text(item["expires_at"]) < now().isoformat():
+        raise invalid
+    return dict(item)
+
+
 def begin_verification(
     table: Table, player_id: PlayerId, address: str, *, now: Callable[[], datetime] = _utcnow
 ) -> str:
@@ -539,20 +604,13 @@ def begin_verification(
     item = _get_profile_item(table, player_id)
     contacts = _decode_contacts(item.get("contacts"))
     _find_contact(contacts, address)
-
-    token = secrets.token_urlsafe(_TOKEN_BYTES)
-    digest = hash_token(token)
-    expires_at = (now() + _VERIFICATION_TTL).isoformat()
-    table.put_item(
-        Item={
-            "PK": _verify_pk(digest),
-            "SK": "TOKEN",
-            "player_id": player_id,
-            "address": address,
-            "expires_at": expires_at,
-        }
+    return _mint_single_use_token(
+        table,
+        _verify_pk,
+        _VERIFICATION_TTL,
+        {"player_id": player_id, "address": address},
+        now=now,
     )
-    return token
 
 
 def complete_verification(
@@ -560,23 +618,54 @@ def complete_verification(
 ) -> None:
     """Redeems a verification token, marking its channel verified.
 
-    The ``VERIFY#`` item is deleted whether or not the token turns out to be expired, so it can
-    never be replayed (DESIGN.md §6.1: "mails a single-use token"). Raises
-    :class:`~t42.storage.errors.InvalidVerificationToken` if the token was never issued, has
-    already been redeemed, or has expired. A no-op, not an error, if the channel was removed
+    Raises :class:`~t42.storage.errors.InvalidVerificationToken` if the token was never issued,
+    has already been redeemed, or has expired. A no-op, not an error, if the channel was removed
     between minting and redeeming - there is nothing left to verify.
     """
-    key = {"PK": _verify_pk(hash_token(token)), "SK": "TOKEN"}
-    item = table.get_item(Key=key).get("Item")
-    if item is None:
-        raise InvalidVerificationToken
-    table.delete_item(Key=key)
-    if as_text(item["expires_at"]) < now().isoformat():
-        raise InvalidVerificationToken
-
+    item = _redeem_single_use_token(table, _verify_pk, token, InvalidVerificationToken, now=now)
     player_id: PlayerId = as_text(item["player_id"])
     address = as_text(item["address"])
     profile_item = _get_profile_item(table, player_id)
     contacts = _decode_contacts(profile_item.get("contacts"))
     new_contacts = tuple(replace(c, verified=True) if c.address == address else c for c in contacts)
     _write_contacts(table, player_id, new_contacts)
+
+
+def begin_password_reset(
+    table: Table, player_id: PlayerId, *, now: Callable[[], datetime] = _utcnow
+) -> str:
+    """Mints a single-use password-reset token for ``player_id`` and returns it - the only time
+    its plaintext exists outside the caller, mirroring :func:`begin_verification`.
+
+    Unlike :func:`begin_verification`, this needs no existence check against the player's
+    contacts: it is not addressed to a channel, and the caller (the API handler) has already
+    decided who to mail before calling this.
+    """
+    return _mint_single_use_token(table, _reset_pk, _RESET_TTL, {"player_id": player_id}, now=now)
+
+
+def complete_password_reset(
+    table: Table, token: str, new_password: str, *, now: Callable[[], datetime] = _utcnow
+) -> None:
+    """Redeems a password-reset token: sets a new password and revokes every device.
+
+    Raises :class:`~t42.storage.errors.InvalidResetToken` if the token was never issued, has
+    already been redeemed, or has expired.
+
+    The password change and each device's revocation are separate writes, not one transaction -
+    DynamoDB's transaction size limit does not accommodate an unbounded number of devices, and a
+    player has few enough of them that this is the same trade-off ``list_tokens``' callers
+    already accept elsewhere. If a revocation fails partway through, the new password has already
+    taken effect and the remaining devices stay signed in; DESIGN.md §6.1's "revoke every issued
+    token" is therefore a same-request best effort; a device left behind that way is fixed by any
+    later, successful revoke.
+    """
+    item = _redeem_single_use_token(table, _reset_pk, token, InvalidResetToken, now=now)
+    player_id: PlayerId = as_text(item["player_id"])
+    table.update_item(
+        Key={"PK": _player_pk(player_id), "SK": "PROFILE"},
+        UpdateExpression="SET password_hash = :h",
+        ExpressionAttributeValues={":h": _hash_password(new_password)},
+    )
+    for device in list_tokens(table, player_id):
+        revoke_token(table, player_id, device.token_hash)

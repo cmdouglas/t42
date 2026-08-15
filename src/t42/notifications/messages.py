@@ -13,10 +13,11 @@ emits, so a caller can pass ``META``'s stored marks straight through. ``render_i
 ``invited_by`` key does not exist in storage yet - ``invite_player`` currently writes only
 ``{game_id, created_at}`` - 4.5 adds it; this module just assumes it will be present.
 
-``render_verify_contact`` (ROADMAP.md 4.2) is a fourth kind, and the odd one out: it isn't driven
-by a ``PLAYER#`` item transition the way the other three are (4.5), it's sent synchronously from
-the API layer the moment a contact channel is added. The address being verified *is* the
-recipient, so unlike the other three there is no ``recipient_username`` to greet.
+``render_verify_contact`` (ROADMAP.md 4.2) and ``render_password_reset`` (ROADMAP.md 4.3) are the
+odd ones out: neither is driven by a ``PLAYER#`` item transition the way the other three are
+(4.5) - both are sent synchronously from the API layer, the moment a contact channel is added or
+a reset is requested. Neither takes a ``recipient_username`` either: the address being verified,
+or the token being redeemed, is enough to identify who is being written to.
 """
 
 from __future__ import annotations
@@ -59,4 +60,11 @@ def render_verify_contact(data: dict[str, Any]) -> tuple[str, str]:
     """Expects: address, token."""
     subject = "Verify this contact address"
     body = f"To verify {data['address']}, run:\n\n    t42 contact confirm {data['token']}\n"
+    return subject, body
+
+
+def render_password_reset(data: dict[str, Any]) -> tuple[str, str]:
+    """Expects: token."""
+    subject = "Reset your password"
+    body = f"To reset your password, run:\n\n    t42 reset-password {data['token']}\n"
     return subject, body

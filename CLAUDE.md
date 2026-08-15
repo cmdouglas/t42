@@ -280,6 +280,39 @@ Phase 4 (notifications) is underway; see ROADMAP.md for the full 4.1-4.7 breakdo
   three from 4.1 are. `POST /contacts/verify` takes no bearer token at all, the same shape
   `register`/`sign_in` already use for working signed-out, since the token in the body is itself
   the credential (DESIGN.md §6.1).
+- **4.3 (password reset)** is complete: a sixth item type, `RESET#<sha256(token)>/TOKEN`, carrying
+  only `player_id` and `expires_at` - no `address`, unlike `VERIFY#`, since a reset is tied to the
+  player rather than a channel. Minting and redeeming a single-use expiring token was, by this
+  point, the same shape twice over (`begin_verification`/`complete_verification` from 4.2), so
+  `accounts.py` factors it into `_mint_single_use_token`/`_redeem_single_use_token` - parameterized
+  on the partition-key function, the TTL, the extra fields carried on the item, and (for redeem)
+  which exception to raise - and `begin_password_reset`/`complete_password_reset` are now the
+  second, thinner callers alongside the rewritten verification pair. Completing a reset also
+  revokes every device via the existing `list_tokens`/`revoke_token`, looped rather than
+  transactional (DynamoDB's transaction size limit doesn't accommodate an unbounded device count,
+  and a player has few enough that this is the same bounded-fan-out trade-off `GET
+  /players/me/invites` already made in 2.7.2) - DESIGN.md §6.1's "revoke every issued token" is
+  therefore a same-request best effort, not an atomic guarantee, and the docstring says so rather
+  than overclaiming. The TTL itself is shorter than verification's (one hour against 24) since
+  redeeming one grants a new password outright rather than merely proving address ownership.
+  `POST /password-resets` answers `202` unconditionally
+  - unknown username, no verified contact, and a mailed reset all look identical on the wire, the
+  same refusal to distinguish cases `authenticate` already makes (though not a fully timing-safe
+  one: unlike `authenticate`'s constant-time dummy hash, the real-username path does strictly more
+  work than the unknown-username one, a residual signal closing which would cost an async send
+  queue this endpoint's risk profile doesn't yet justify) - and mails only the first **verified**
+  email contact, deliberately not every one, so a mid-flight send failure across a multi-contact
+  player's addresses can never surface as a raised exception after a token already reached some of
+  them. `notify` (the per-channel mute) is deliberately not consulted, since this is a
+  security-critical message the player just triggered by name, not a gameplay notification. `POST
+  /password-resets/confirm` takes no bearer token, the same shape `POST /contacts/verify` already
+  uses, since the token in the body is itself the credential. `request_password_reset` is the one
+  handler that calls `player_for_username` and *catches* its `PlayerNotFound` rather than letting
+  it propagate to a 404, the opposite of every other caller (`POST /games/{id}/invites`) - the
+  whole point being that an unknown username produces the same `202` as a known one. `messages.py`
+  gains a fifth renderer,
+  `render_password_reset`, alongside a gap closed in passing: `render_verify_contact` had no test of
+  its own since 4.2 landed it - both now have one in `tests/notifications/test_messages.py`.
 
 ## Layout
 
@@ -307,14 +340,14 @@ src/t42/storage/    DynamoDB event log + materialized state   (Phases 1, 2 and 2
     repository.py   start_game/get_state/append/find_request, GameStatus (1.3, 1.4, 2.2)
     lobby.py        create_pending_game/join_seat/list_games_for_player/
                      list_open_games, Visibility                  (2.2, 2.7.2, 2.7.3)
-    accounts.py     players, passwords, per-device bearer tokens,
-                     contact channels + email verification    (2.1, 2.7.2, 4.2)
+    accounts.py     players, passwords, per-device bearer tokens, contact channels,
+                     email verification + password reset      (2.1, 2.7.2, 4.2, 4.3)
     rule_sets.py    named HouseRules saved under a player's own partition (2.7.1)
     invites.py      GAME#/INVITE# + PLAYER#/INVITE# permission-grant CRUD (2.7.2)
     errors.py       GameNotFound, VersionConflict, SeatTaken, InvalidToken, ...
     schema.py       create_table(dynamodb, name); `python -m t42.storage.schema` (3.6)
 src/t42/api/        FastAPI app behind Mangum                 (Phases 2, 2.7 and 4.2, ongoing)
-    app.py          the twenty-seven endpoints; `_submit` is the one write path for moves (2.4)
+    app.py          the twenty-nine endpoints; `_submit` is the one write path for moves (2.4)
     deps.py         table/sender handles and the bearer-token dependency, all overridable (2.4, 4.2)
     schemas.py      pydantic request/response bodies; the bid body is discriminated (2.3)
     errors.py       domain exception -> status code + machine-readable code          (2.3)
@@ -332,7 +365,8 @@ src/t42/cli/        thin command-line client                  (Phase 3, complete
 src/t42/notifications/  the send channel (Phase 4, underway)
     sender.py       EmailSender protocol; ConsoleSender/SesSender, chosen by env var (4.1)
     messages.py     pure dict -> (subject, body) renderers, one per notification kind
-                     (4.1: turn/game-over/invite; 4.2 adds render_verify_contact)
+                     (4.1: turn/game-over/invite; 4.2 adds render_verify_contact;
+                     4.3 adds render_password_reset)
 tests/conftest.py   the `table` (moto) and `real_table` (DynamoDB Local via testcontainers)
                     fixtures, shared by tests/storage/ and tests/api/
 tests/engine/       mirrors the engine modules; test_full_game.py is the Phase 0 milestone demo;
@@ -346,7 +380,10 @@ tests/api/          contract tests over FastAPI's in-process TestClient, with `t
                     `Client`/`play_until` drive a whole game over HTTP, and every test goes
                     through the public API only. test_contacts.py (4.2) covers contact
                     channels and verification, including redeeming a token with no bearer
-                    token at all - proving `POST /contacts/verify` really works signed-out
+                    token at all - proving `POST /contacts/verify` really works signed-out.
+                    test_password_reset.py (4.3) covers the same signed-out shape for
+                    `POST /password-resets`/`/password-resets/confirm`, plus the `202`
+                    regardless-of-username-existence contract
 tests/cli/          mirrors src/t42/cli/; conftest.py's `cli_app_client` (`TestClient(app)` + the
                     moto `table` override) and `_config_home` are shared by every file here.
                     _helpers.py's `FakeTransport` fakes `t42.cli.api.Transport` with no network,

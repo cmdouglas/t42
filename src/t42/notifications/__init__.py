@@ -17,7 +17,13 @@ real caller.
 
 from __future__ import annotations
 
-from .messages import render_game_over, render_invite, render_verify_contact, render_your_turn
+from .messages import (
+    render_game_over,
+    render_invite,
+    render_password_reset,
+    render_verify_contact,
+    render_your_turn,
+)
 from .sender import (
     EMAIL_SENDER_ENV,
     SES_FROM_ADDRESS_ENV,
@@ -36,6 +42,7 @@ __all__ = [
     "get_sender",
     "render_game_over",
     "render_invite",
+    "render_password_reset",
     "render_verify_contact",
     "render_your_turn",
 ]

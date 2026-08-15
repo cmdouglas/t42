@@ -35,6 +35,7 @@ from t42.storage.errors import (
     GameNotFound,
     GameNotJoinable,
     InvalidCredentials,
+    InvalidResetToken,
     InvalidToken,
     InvalidVerificationToken,
     NotInvited,
@@ -96,6 +97,7 @@ _MAPPING: Final[tuple[tuple[type[Exception], int, str], ...]] = (
     (InvalidToken, status.HTTP_401_UNAUTHORIZED, "INVALID_TOKEN"),
     (InvalidCredentials, status.HTTP_401_UNAUTHORIZED, "INVALID_CREDENTIALS"),
     (InvalidVerificationToken, status.HTTP_401_UNAUTHORIZED, "INVALID_VERIFICATION_TOKEN"),
+    (InvalidResetToken, status.HTTP_401_UNAUTHORIZED, "INVALID_RESET_TOKEN"),
     # 404 - no such thing
     (GameNotFound, status.HTTP_404_NOT_FOUND, "GAME_NOT_FOUND"),
     (RuleSetNotFound, status.HTTP_404_NOT_FOUND, "RULE_SET_NOT_FOUND"),
