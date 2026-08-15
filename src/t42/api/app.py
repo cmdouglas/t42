@@ -23,13 +23,15 @@ from t42.engine.house_rules import HouseRules
 from t42.engine.moves import Move
 from t42.engine.projection import project
 from t42.engine.state import GameId, PlayerId
-from t42.notifications import render_verify_contact
+from t42.notifications import render_password_reset, render_verify_contact
 from t42.storage.accounts import (
     ContactChannel,
     Player,
     add_contact,
     authenticate,
+    begin_password_reset,
     begin_verification,
+    complete_password_reset,
     complete_verification,
     create_player,
     get_player,
@@ -46,6 +48,7 @@ from t42.storage.errors import (
     GameAlreadyExists,
     GameNotFound,
     GameNotJoinable,
+    PlayerNotFound,
     VersionConflict,
 )
 from t42.storage.events import events_for_move
@@ -95,6 +98,8 @@ from .schemas import (
     InviteResponse,
     JoinGameRequest,
     OpenGamesResponse,
+    PasswordResetConfirmRequest,
+    PasswordResetRequest,
     PlayDominoRequest,
     PlayerResponse,
     RegisterRequest,
@@ -231,6 +236,45 @@ def verify_contact(table: TableDep, body: VerifyContactRequest) -> None:
     (DESIGN.md §6.1), and it arrives in an email the player may open on a device that has never
     signed in."""
     complete_verification(table, body.token)
+
+
+@app.post("/password-resets", status_code=status.HTTP_202_ACCEPTED)
+def request_password_reset(
+    table: TableDep, sender: EmailSenderDep, body: PasswordResetRequest
+) -> None:
+    """Always answers ``202``, whether or not ``username`` exists or has a verified channel
+    (DESIGN.md §6.1) - the same refusal to distinguish cases that sign-in already makes. Mails
+    the first **verified** email contact, since an unverified address may belong to someone
+    other than the account owner - and only one, so a mid-flight send failure can never leave
+    the caller with a raised exception after a token has already reached some, but not all, of a
+    multi-contact player's addresses.
+
+    This is not fully timing-safe: unlike ``authenticate``'s constant-time dummy hash, a request
+    for an unknown username returns after one read while a real one does more work (a further
+    read, minting a token, and a synchronous email send), so response latency alone is a
+    residual, low-severity username-existence signal. Closing it fully would mean queuing the
+    send instead of making it inline, which is more machinery than this endpoint's risk profile
+    currently justifies.
+    """
+    try:
+        player_id = player_for_username(table, body.username)
+    except PlayerNotFound:
+        return
+    player = get_player(table, player_id)
+    verified = next((c for c in player.contacts if c.kind == "email" and c.verified), None)
+    if verified is None:
+        return
+    token = begin_password_reset(table, player_id)
+    subject, body_text = render_password_reset({"token": token})
+    sender.send(verified.address, subject, body_text)
+
+
+@app.post("/password-resets/confirm", status_code=status.HTTP_204_NO_CONTENT)
+def confirm_password_reset(table: TableDep, body: PasswordResetConfirmRequest) -> None:
+    """Deliberately takes no bearer token, the same reason ``verify_contact`` doesn't: the token
+    in the body is itself the credential. Setting the new password and revoking every device
+    both happen inside :func:`~t42.storage.accounts.complete_password_reset` (DESIGN.md §6.1)."""
+    complete_password_reset(table, body.token, body.new_password)
 
 
 @app.get("/players/me/games")

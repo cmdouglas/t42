@@ -1,4 +1,4 @@
-"""Accounts and auth tokens (ROADMAP.md 2.1, 4.2)."""
+"""Accounts and auth tokens (ROADMAP.md 2.1, 4.2, 4.3)."""
 
 from __future__ import annotations
 
@@ -11,7 +11,9 @@ from t42.storage.accounts import (
     ContactChannel,
     add_contact,
     authenticate,
+    begin_password_reset,
     begin_verification,
+    complete_password_reset,
     complete_verification,
     create_player,
     get_player,
@@ -27,6 +29,7 @@ from t42.storage.errors import (
     ContactAlreadyExists,
     ContactNotFound,
     InvalidCredentials,
+    InvalidResetToken,
     InvalidToken,
     InvalidVerificationToken,
     UsernameTaken,
@@ -313,3 +316,64 @@ def test_verifying_a_channel_removed_after_the_token_was_minted_is_a_no_op(table
     complete_verification(table, token)  # does not raise
 
     assert get_player(table, player.player_id).contacts == ()
+
+
+# ----------------------------------------------------------------------- password reset (4.3)
+
+
+def test_password_reset_round_trip_changes_the_password(table: Table) -> None:
+    player = create_player(table, "charlie", "hunter2")
+
+    token = begin_password_reset(table, player.player_id)
+    complete_password_reset(table, token, "correct horse battery staple")
+
+    assert authenticate(table, "charlie", "correct horse battery staple") == player.player_id
+    with pytest.raises(InvalidCredentials):
+        authenticate(table, "charlie", "hunter2")
+
+
+def test_completing_a_password_reset_revokes_every_device(table: Table) -> None:
+    player = create_player(table, "charlie", "hunter2")
+    desktop = issue_token(table, player.player_id, "desktop")
+    phone = issue_token(table, player.player_id, "phone")
+
+    token = begin_password_reset(table, player.player_id)
+    complete_password_reset(table, token, "new-password")
+
+    assert list_tokens(table, player.player_id) == ()
+    with pytest.raises(InvalidToken):
+        player_for_token(table, desktop)
+    with pytest.raises(InvalidToken):
+        player_for_token(table, phone)
+
+
+def test_an_unissued_reset_token_is_rejected(table: Table) -> None:
+    with pytest.raises(InvalidResetToken):
+        complete_password_reset(table, "not-a-real-token", "new-password")
+
+
+def test_a_reset_token_is_single_use(table: Table) -> None:
+    player = create_player(table, "charlie", "hunter2")
+    token = begin_password_reset(table, player.player_id)
+
+    complete_password_reset(table, token, "new-password")
+
+    with pytest.raises(InvalidResetToken):
+        complete_password_reset(table, token, "another-password")
+
+
+def test_an_expired_reset_token_is_rejected_and_still_consumed(table: Table) -> None:
+    player = create_player(table, "charlie", "hunter2")
+    start = datetime(2026, 1, 1, tzinfo=UTC)
+    token = begin_password_reset(table, player.player_id, now=lambda: start)
+
+    with pytest.raises(InvalidResetToken):
+        complete_password_reset(
+            table, token, "new-password", now=lambda: start + timedelta(hours=2)
+        )
+
+    # Single-use even when rejected for expiry: a retry must not somehow succeed.
+    with pytest.raises(InvalidResetToken):
+        complete_password_reset(table, token, "new-password", now=lambda: start)
+
+    assert authenticate(table, "charlie", "hunter2") == player.player_id

@@ -119,6 +119,23 @@ class VerifyContactRequest(_Strict):
     token: str
 
 
+class PasswordResetRequest(_Strict):
+    """The ``POST /password-resets`` body (DESIGN.md §6.1). Answered ``202`` unconditionally,
+    whether or not the username exists - the same reason sign-in never says which half of a
+    credential was wrong."""
+
+    username: _Username
+
+
+class PasswordResetConfirmRequest(_Strict):
+    """The ``POST /password-resets/confirm`` body. The token is the whole credential, the same
+    way ``VerifyContactRequest``'s is, so this carries no other identifying information besides
+    the new password itself."""
+
+    token: str
+    new_password: _Password
+
+
 class PlayerResponse(BaseModel):
     player_id: PlayerId
     username: str

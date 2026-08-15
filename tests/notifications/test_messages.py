@@ -7,7 +7,13 @@ from typing import Any
 
 import pytest
 
-from t42.notifications.messages import render_game_over, render_invite, render_your_turn
+from t42.notifications.messages import (
+    render_game_over,
+    render_invite,
+    render_password_reset,
+    render_verify_contact,
+    render_your_turn,
+)
 
 _CASES: tuple[tuple[Callable[[dict[str, Any]], tuple[str, str]], dict[str, Any]], ...] = (
     (
@@ -33,6 +39,14 @@ _CASES: tuple[tuple[Callable[[dict[str, Any]], tuple[str, str]], dict[str, Any]]
     (
         render_invite,
         {"game_id": "7F3AKM", "recipient_username": "alice", "invited_by": "bob"},
+    ),
+    (
+        render_verify_contact,
+        {"address": "alice@example.com", "token": "tok123"},
+    ),
+    (
+        render_password_reset,
+        {"token": "tok123"},
     ),
 )
 
@@ -82,3 +96,16 @@ def test_render_invite_mentions_inviter_and_game() -> None:
     _, body = render_invite(data)
     assert "bob" in body
     assert "7F3AKM" in body
+
+
+def test_render_verify_contact_mentions_address_and_token() -> None:
+    data = {"address": "alice@example.com", "token": "tok123"}
+    _, body = render_verify_contact(data)
+    assert "alice@example.com" in body
+    assert "tok123" in body
+
+
+def test_render_password_reset_mentions_the_token() -> None:
+    data = {"token": "tok123"}
+    _, body = render_password_reset(data)
+    assert "tok123" in body

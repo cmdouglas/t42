@@ -160,3 +160,12 @@ class InvalidVerificationToken(StorageError):
 
     def __init__(self) -> None:
         super().__init__("the supplied verification token is not valid")
+
+
+class InvalidResetToken(StorageError):
+    """The password-reset token was never issued, has already been redeemed, or has expired
+    (ROADMAP.md 4.3). The token is itself the credential (DESIGN.md §6.1), so this carries no
+    detail about which of the three it was."""
+
+    def __init__(self) -> None:
+        super().__init__("the supplied reset token is not valid")
