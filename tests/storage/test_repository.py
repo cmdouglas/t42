@@ -12,7 +12,7 @@ from t42.engine.events import Event
 from t42.engine.game import apply_move, legal_moves
 from t42.engine.house_rules import HouseRules
 from t42.engine.moves import Move
-from t42.engine.state import GameState, Seat
+from t42.engine.state import GameState, Seat, Team
 from t42.storage.errors import GameAlreadyExists, GameNotFound, VersionConflict
 from t42.storage.events import events_for_move, hand_dealt_event
 from t42.storage.lobby import create_pending_game
@@ -138,13 +138,22 @@ def test_append_updates_player_turn_status(table: Table) -> None:
     new_state = apply_move(state, move, rng=Random(1))
     events = events_for_move(state, move, new_state)
 
-    append(table, "g1", events, new_state, expected_version=1)
+    new_version = append(table, "g1", events, new_state, expected_version=1)
 
     next_seat = new_state.to_act
     assert next_seat is not None
     for seat_iter, player_id in PLAYERS.items():
         item = table.get_item(Key={"PK": f"PLAYER#{player_id}", "SK": "GAME#g1"})["Item"]
         assert item["is_my_turn"] == (seat_iter == next_seat)
+        assert item["version"] == new_version
+
+
+def test_start_game_stamps_player_items_with_version_one(table: Table) -> None:
+    _create(table, "g1")
+
+    for player_id in PLAYERS.values():
+        item = table.get_item(Key={"PK": f"PLAYER#{player_id}", "SK": "GAME#g1"})["Item"]
+        assert item["version"] == 1
 
 
 def test_last_activity_at_advances_on_append(table: Table) -> None:
@@ -197,3 +206,13 @@ def test_full_game_through_repository_reaches_game_over_and_matches_replay(table
     assert stored.state == final
 
     assert replay(game_id, PLAYERS, config, logged_events) == final
+
+    meta = table.get_item(Key={"PK": f"GAME#{game_id}", "SK": "META"})["Item"]
+    assert meta["marks"] == {
+        "north_south": final.marks.get(Team.NORTH_SOUTH, 0),
+        "east_west": final.marks.get(Team.EAST_WEST, 0),
+    }
+    for player_id in PLAYERS.values():
+        item = table.get_item(Key={"PK": f"PLAYER#{player_id}", "SK": f"GAME#{game_id}"})["Item"]
+        assert item["version"] == stored.version
+        assert item["status"] == "COMPLETE"

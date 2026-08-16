@@ -27,14 +27,16 @@ def _open_lobby(table: Table, visibility: Visibility, game_id: str = "g1") -> No
 
 
 def test_invite_player_writes_both_items(table: Table) -> None:
-    invite_player(table, "g1", "east", "east")
+    invite_player(table, "g1", "east", "east", inviter_username="north")
 
     assert table.get_item(Key={"PK": "GAME#g1", "SK": "INVITE#east"})["Item"]["username"] == "east"
-    assert table.get_item(Key={"PK": "PLAYER#east", "SK": "INVITE#g1"})["Item"]["game_id"] == "g1"
+    invitee_item = table.get_item(Key={"PK": "PLAYER#east", "SK": "INVITE#g1"})["Item"]
+    assert invitee_item["game_id"] == "g1"
+    assert invitee_item["invited_by"] == "north"
 
 
 def test_revoke_invite_deletes_both_items(table: Table) -> None:
-    invite_player(table, "g1", "east", "east")
+    invite_player(table, "g1", "east", "east", inviter_username="north")
 
     revoke_invite(table, "g1", "east")
 
@@ -48,9 +50,9 @@ def test_revoking_an_invite_that_never_existed_is_a_no_op(table: Table) -> None:
 
 def test_re_inviting_overwrites_rather_than_raising(table: Table) -> None:
     """A client retry looks exactly like a second invite (ROADMAP.md 2.7.2)."""
-    invite_player(table, "g1", "east", "east")
+    invite_player(table, "g1", "east", "east", inviter_username="north")
 
-    invite_player(table, "g1", "east", "east")  # must not raise
+    invite_player(table, "g1", "east", "east", inviter_username="north")  # must not raise
 
     assert find_invite(table, "g1", "east")
 
@@ -58,7 +60,7 @@ def test_re_inviting_overwrites_rather_than_raising(table: Table) -> None:
 def test_find_invite_reflects_presence_and_absence(table: Table) -> None:
     assert find_invite(table, "g1", "east") is False
 
-    invite_player(table, "g1", "east", "east")
+    invite_player(table, "g1", "east", "east", inviter_username="north")
     assert find_invite(table, "g1", "east") is True
 
     revoke_invite(table, "g1", "east")
@@ -66,9 +68,9 @@ def test_find_invite_reflects_presence_and_absence(table: Table) -> None:
 
 
 def test_list_invites_for_player_is_scoped_and_newest_first(table: Table) -> None:
-    invite_player(table, "g1", "east", "east")
-    invite_player(table, "g2", "east", "east")
-    invite_player(table, "g3", "somebody-else", "somebody-else")
+    invite_player(table, "g1", "east", "east", inviter_username="north")
+    invite_player(table, "g2", "east", "east", inviter_username="north")
+    invite_player(table, "g3", "somebody-else", "somebody-else", inviter_username="north")
 
     invites = list_invites_for_player(table, "east")
 
@@ -76,9 +78,9 @@ def test_list_invites_for_player_is_scoped_and_newest_first(table: Table) -> Non
 
 
 def test_list_invites_for_game_is_scoped_and_newest_first(table: Table) -> None:
-    invite_player(table, "g1", "east", "east")
-    invite_player(table, "g1", "south", "south")
-    invite_player(table, "g2", "west", "west")
+    invite_player(table, "g1", "east", "east", inviter_username="north")
+    invite_player(table, "g1", "south", "south", inviter_username="north")
+    invite_player(table, "g2", "west", "west", inviter_username="north")
 
     invites = list_invites_for_game(table, "g1")
 
@@ -88,8 +90,8 @@ def test_list_invites_for_game_is_scoped_and_newest_first(table: Table) -> None:
 
 def test_list_invites_for_game_shrinks_on_revoke_or_join(table: Table) -> None:
     _open_lobby(table, Visibility.INVITE_ONLY)
-    invite_player(table, "g1", "east", "east")
-    invite_player(table, "g1", "south", "south")
+    invite_player(table, "g1", "east", "east", inviter_username="north")
+    invite_player(table, "g1", "south", "south", inviter_username="north")
 
     revoke_invite(table, "g1", "south")
     assert {i.player_id for i in list_invites_for_game(table, "g1")} == {"east"}
@@ -107,7 +109,7 @@ def test_join_seat_refuses_an_uninvited_player_on_an_invite_only_game(table: Tab
 
 def test_join_seat_admits_an_invited_player_and_consumes_the_invite(table: Table) -> None:
     _open_lobby(table, Visibility.INVITE_ONLY)
-    invite_player(table, "g1", "east", "east")
+    invite_player(table, "g1", "east", "east", inviter_username="north")
 
     lobby = join_seat(table, "g1", "east", "east", Seat.EAST, rng=Random(0))
 
@@ -127,7 +129,7 @@ def test_join_seat_on_a_public_game_needs_no_invite(table: Table) -> None:
 def test_join_seat_still_consumes_a_stray_invite_on_a_public_game(table: Table) -> None:
     """Nothing forbids inviting somebody to a public table; a join still cleans it up."""
     _open_lobby(table, Visibility.PUBLIC)
-    invite_player(table, "g1", "east", "east")
+    invite_player(table, "g1", "east", "east", inviter_username="north")
 
     join_seat(table, "g1", "east", "east", Seat.EAST, rng=Random(0))
 

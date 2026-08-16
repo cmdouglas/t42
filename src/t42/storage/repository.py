@@ -26,7 +26,7 @@ from mypy_boto3_dynamodb.service_resource import Table
 from t42.engine.events import Event
 from t42.engine.game import new_game
 from t42.engine.house_rules import HouseRules
-from t42.engine.state import GameId, GameState, Phase, PlayerId, Seat
+from t42.engine.state import GameId, GameState, Phase, PlayerId, Seat, Team
 
 from ._dynamo import from_dynamo, is_transaction_cancelled, transact_write
 from .codec import decode_game_state, encode_event, encode_game_state
@@ -157,11 +157,12 @@ def start_game(
                 "Update": {
                     "TableName": table.name,
                     "Key": {"PK": _player_pk(player_id), "SK": _game_sk(game_id)},
-                    "UpdateExpression": "SET is_my_turn = :turn, #status = :active",
+                    "UpdateExpression": "SET is_my_turn = :turn, #status = :active, version = :v",
                     "ExpressionAttributeNames": {"#status": "status"},
                     "ExpressionAttributeValues": {
                         ":turn": seat == state.to_act,
                         ":active": GameStatus.ACTIVE.value,
+                        ":v": 1,
                     },
                 }
             }
@@ -218,8 +219,11 @@ def append(
     """Writes ``events`` and the resulting ``new_state`` in one transaction, conditioned on
     ``expected_version`` still matching what's stored - the write optimistic concurrency depends
     on. Also updates ``META.last_activity_at`` (DESIGN.md §9) and every ``PLAYER#`` item's turn
-    status. Raises ``VersionConflict`` if the transaction is cancelled; returns the new version on
-    success.
+    status and ``version`` - the same ``new_version`` written to ``STATE``, which is what lets the
+    notification handler (ROADMAP.md 4.5) dedupe a redelivered stream record without a separate
+    counter. On the move that ends the game, ``META`` also gains the final ``marks`` map, so that
+    handler can render a game-over email without ever reading ``STATE``. Raises
+    ``VersionConflict`` if the transaction is cancelled; returns the new version on success.
 
     ``request_id``, when given, makes this call idempotent (ROADMAP.md 1.4, DESIGN.md §6/§9): a
     ``REQUEST#<requestId>`` marker recording the resulting version is written in the same
@@ -264,17 +268,26 @@ def append(
     )
     # The move that ends the game retires it from every "my games" listing in the same
     # transaction that records it, so no listing can ever show a finished game as still waiting.
-    status = (
-        GameStatus.COMPLETE if new_state.phase is Phase.GAME_OVER else GameStatus.ACTIVE
-    ).value
+    game_over = new_state.phase is Phase.GAME_OVER
+    status = (GameStatus.COMPLETE if game_over else GameStatus.ACTIVE).value
+    meta_expression = "SET last_activity_at = :ts, #status = :status"
+    meta_values: dict[str, Any] = {":ts": timestamp, ":status": status}
+    if game_over:
+        # Denormalized so the notification handler (ROADMAP.md 4.5) can render a game-over email
+        # from META alone, the one item it's allowed to read - it never touches STATE.
+        meta_expression += ", marks = :marks"
+        meta_values[":marks"] = {
+            "north_south": new_state.marks.get(Team.NORTH_SOUTH, 0),
+            "east_west": new_state.marks.get(Team.EAST_WEST, 0),
+        }
     transact_items.append(
         {
             "Update": {
                 "TableName": table.name,
                 "Key": {"PK": _game_pk(game_id), "SK": "META"},
-                "UpdateExpression": "SET last_activity_at = :ts, #status = :status",
+                "UpdateExpression": meta_expression,
                 "ExpressionAttributeNames": {"#status": "status"},
-                "ExpressionAttributeValues": {":ts": timestamp, ":status": status},
+                "ExpressionAttributeValues": meta_values,
             }
         }
     )
@@ -283,11 +296,12 @@ def append(
             "Update": {
                 "TableName": table.name,
                 "Key": {"PK": _player_pk(player_id), "SK": _game_sk(game_id)},
-                "UpdateExpression": "SET is_my_turn = :turn, #status = :status",
+                "UpdateExpression": "SET is_my_turn = :turn, #status = :status, version = :v",
                 "ExpressionAttributeNames": {"#status": "status"},
                 "ExpressionAttributeValues": {
                     ":turn": seat == new_state.to_act,
                     ":status": status,
+                    ":v": new_version,
                 },
             }
         }

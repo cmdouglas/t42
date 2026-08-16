@@ -65,6 +65,34 @@ def test_modify_decodes_both_images_including_bool_and_numeric_attributes() -> N
     assert transition.new["is_my_turn"] is True
 
 
+def test_empty_map_attribute_decodes_without_its_type_wrapper() -> None:
+    """Real DynamoDB Streams (confirmed against DynamoDB Local, not reproduced by moto) drops the
+    "M" wrapper for an empty map attribute - HouseRules.contract_options={} is the common case -
+    so a bare {} shows up nested inside NewImage/OldImage instead of {"M": {}}. Regression for a
+    crash found end-to-end: TypeDeserializer treats a bare {} as malformed input."""
+    record = {
+        "eventName": "MODIFY",
+        "dynamodb": {
+            "Keys": {"PK": {"S": "GAME#g1"}, "SK": {"S": "META"}},
+            "NewImage": {
+                "PK": {"S": "GAME#g1"},
+                "SK": {"S": "META"},
+                "config": {
+                    "M": {
+                        "marks_to_win": {"N": "7"},
+                        "contract_options": {},
+                    }
+                },
+            },
+        },
+    }
+
+    transition = transition_from_record(record)
+
+    assert transition.new is not None
+    assert transition.new["config"] == {"marks_to_win": 7, "contract_options": {}}
+
+
 def test_remove_has_no_new_image() -> None:
     record = {
         "eventName": "REMOVE",

@@ -82,6 +82,7 @@ def invite_player(
     invitee_id: PlayerId,
     invitee_username: str,
     *,
+    inviter_username: str,
     now: Callable[[], datetime] = _utcnow,
 ) -> None:
     """Grants ``invitee_id`` permission to join ``game_id``.
@@ -89,6 +90,11 @@ def invite_player(
     Idempotent: re-inviting the same player overwrites silently rather than raising, since a
     client that didn't see its own response will retry (ROADMAP.md 2.7.2). Does no validation of
     its own - see the module docstring for why that lives in the handler instead.
+
+    ``inviter_username`` is denormalized onto the invitee's own item as ``invited_by``, the same
+    trade-off ``lobby.SeatAssignment`` already makes for seat usernames: the notification handler
+    (ROADMAP.md 4.5) needs a display string, not an id, and keyword-only so it can't be silently
+    transposed with the adjacent ``invitee_username``.
     """
     timestamp = now().isoformat()
     transact_write(
@@ -113,6 +119,7 @@ def invite_player(
                         "PK": _player_pk(invitee_id),
                         "SK": _player_invite_sk(game_id),
                         "game_id": game_id,
+                        "invited_by": inviter_username,
                         "created_at": timestamp,
                     },
                 }

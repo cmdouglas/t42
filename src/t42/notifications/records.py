@@ -34,8 +34,33 @@ class Transition:
     new: dict[str, Any] | None
 
 
+def _restore_empty_map_wrapper(value: Any) -> Any:
+    """Real DynamoDB Streams - confirmed against DynamoDB Local, not just moto - represents an
+    empty map attribute as a bare ``{}`` in ``OldImage``/``NewImage``, dropping the ``"M"`` type
+    wrapper every other attribute value carries (``HouseRules.contract_options`` is the common
+    case: it's ``{}`` whenever a game uses no contract options at all). ``TypeDeserializer``
+    treats a bare ``{}`` as malformed input rather than an empty map and raises. Empty lists are
+    not affected - they arrive as ``{"L": []}``, wrapper intact - so this only ever needs to
+    restore ``"M"``. Walks the attribute-value tree ahead of deserializing, since the bare ``{}``
+    can appear at any nesting depth, not just the top level.
+    """
+    if not isinstance(value, dict):
+        return value
+    if not value:
+        return {"M": {}}
+    ((type_key, inner),) = value.items()
+    if type_key == "M":
+        return {"M": {k: _restore_empty_map_wrapper(v) for k, v in inner.items()}}
+    if type_key == "L":
+        return {"L": [_restore_empty_map_wrapper(v) for v in inner]}
+    return value
+
+
 def _decode(image: Mapping[str, Any]) -> dict[str, Any]:
-    return {key: _deserializer.deserialize(value) for key, value in image.items()}
+    return {
+        key: _deserializer.deserialize(_restore_empty_map_wrapper(value))
+        for key, value in image.items()
+    }
 
 
 def _decode_optional(image: Mapping[str, Any] | None) -> dict[str, Any] | None:
