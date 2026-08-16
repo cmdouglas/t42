@@ -131,6 +131,9 @@ wheels = [
 dynamodb = [
     { name = "mypy-boto3-dynamodb" },
 ]
+dynamodbstreams = [
+    { name = "mypy-boto3-dynamodbstreams" },
+]
 
 [[package]]
 name = "botocore"
@@ -756,6 +759,15 @@ wheels = [
 ]
 
 [[package]]
+name = "mypy-boto3-dynamodbstreams"
+version = "1.43.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/a0/72/61a94effeb1dfdbaf217d45dea4623f5257139dc137eb8b3848348e49341/mypy_boto3_dynamodbstreams-1.43.0.tar.gz", hash = "sha256:892622db831343e34d407d5efdbbc9303e8d550fea57f398e3d492a532f0743a", size = 16310, upload-time = "2026-04-29T23:00:00.812Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/cc/49/6d19646fc1b595d0e8a26d507f166506e178fffc290bafa0e1cef70db827/mypy_boto3_dynamodbstreams-1.43.0-py3-none-any.whl", hash = "sha256:473f11971b231d19a2540952b52b0524233cf48d5963b6523d7fe0d4a4cf74e1", size = 20417, upload-time = "2026-04-29T22:59:58.207Z" },
+]
+
+[[package]]
 name = "mypy-extensions"
 version = "1.1.0"
 source = { registry = "https://pypi.org/simple" }
@@ -1089,7 +1101,7 @@ cli = [
     { name = "httpx2" },
 ]
 dev = [
-    { name = "boto3-stubs", extra = ["dynamodb"] },
+    { name = "boto3-stubs", extra = ["dynamodb", "dynamodbstreams"] },
     { name = "httpx" },
     { name = "httpx2" },
     { name = "hypothesis" },
@@ -1104,7 +1116,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "boto3", specifier = ">=1.35" },
-    { name = "boto3-stubs", extras = ["dynamodb"], marker = "extra == 'dev'", specifier = ">=1.35" },
+    { name = "boto3-stubs", extras = ["dynamodb", "dynamodbstreams"], marker = "extra == 'dev'", specifier = ">=1.35" },
     { name = "fastapi", specifier = ">=0.141.1" },
     { name = "httpx", marker = "extra == 'dev'", specifier = ">=0.28.1" },
     { name = "httpx2", marker = "extra == 'cli'", specifier = ">=2.10.0" },

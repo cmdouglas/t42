@@ -8,11 +8,13 @@ ROADMAP.md 4.7).
 
 ``sender`` is the transport - an ``EmailSender`` protocol with a console and an SES
 implementation, chosen by environment variable. ``messages`` is pure content - a
-``dict -> (subject, body)`` renderer per notification kind. Nothing in this package yet decides
-*who* to notify or *when* for the three ``PLAYER#``-item-driven kinds; that is ROADMAP.md 4.5's
-handler, built on top of both. Contact verification (4.2) is the exception: it is sent
-synchronously from the API layer, not stream-driven, so ``render_verify_contact`` already has a
-real caller.
+``dict -> (subject, body)`` renderer per notification kind. ``records`` decodes a raw DynamoDB
+Streams record into plain data, and ``pump`` (``python -m t42.notifications.pump``, ROADMAP.md 4.4)
+polls the stream locally and hands batches to ``handler.lambda_handler`` - which is still a stub.
+The delivery mechanism is finished; *who* to notify and *when*, for the three ``PLAYER#``-item-
+driven kinds, is ROADMAP.md 4.5's handler, built on top of all of it. Contact verification (4.2)
+and password reset (4.3) are the exception: both are sent synchronously from the API layer, not
+stream-driven, so ``render_verify_contact``/``render_password_reset`` already have real callers.
 """
 
 from __future__ import annotations

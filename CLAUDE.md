@@ -313,6 +313,41 @@ Phase 4 (notifications) is underway; see ROADMAP.md for the full 4.1-4.7 breakdo
   gains a fifth renderer,
   `render_password_reset`, alongside a gap closed in passing: `render_verify_contact` had no test of
   its own since 4.2 landed it - both now have one in `tests/notifications/test_messages.py`.
+- **4.4 (Streams and the local pump)** is complete: `schema.create_table` enables the table's
+  stream (`NEW_AND_OLD_IMAGES`), picked up by the moto and DynamoDB Local fixtures alike since both
+  build from that one function. Two new modules are pure plumbing, deciding nothing: `records.py`'s
+  `transition_from_record` turns one raw stream record (still DynamoDB-JSON - the one place that
+  shape is visible outside the resource-level `Table` API) into a `Transition(event_name, keys, old,
+  new)` of plain data via `boto3.dynamodb.types.TypeDeserializer`; `pump.py`'s `poll()` (`python -m
+  t42.notifications.pump`) discovers the stream's shards, tracks a `TRIM_HORIZON` iterator per open
+  shard, and calls a handler with a `{"Records": [...]}` batch shaped exactly like a real Lambda
+  event-source mapping would deliver - the local and deployed paths exercise the same entry point.
+  A shard that closes (no `NextShardIterator`) goes into a `drained` set rather than just being
+  dropped from the tracked iterators: `describe_stream` keeps listing a closed shard for a while,
+  so without that memory the next cycle's discovery step would treat it as new and re-read it from
+  `TRIM_HORIZON` forever, redelivering the same records on every cycle - caught by code review
+  before merge, with `tests/notifications/test_pump.py`'s fake multi-cycle streams client (a real
+  moto session can't deterministically close a shard on demand) proving the regression and the fix
+  both: the test fails against the pre-fix code and passes against the shipped version.
+  `handler.py`'s `lambda_handler` is a stub (`NotImplementedError`, no tests, the project's existing
+  convention for a phase's not-yet-built consumer) that exists purely so `pump.py` has something to
+  call; `poll()` itself takes `handler` as an injectable parameter, so its own tests exercise the
+  real polling/decoding path against a spy rather than the stub. `tests/notifications/
+  test_layering.py`, pulled forward from ROADMAP.md 4.7 since it's cheap and guards exactly the
+  modules this phase adds, is an `ast`-based check that nothing under `t42.notifications` imports
+  `t42.engine` or any of `t42.storage`'s `repository`/`codec`/`replay` (only `accounts` is allowed).
+  **A real regression surfaced and was fixed in the same phase**: moto's `TransactWriteItems`
+  deep-copies the whole table - stream history included - as a rollback backup before every call, so
+  once the table's stream carries the accumulating history of a long game's many
+  `repository.append()` transactions, that per-call deep-copy cost grows with the call count,
+  making the whole fast suite's cost roughly quadratic in the heaviest test's move count. The one
+  test genuinely exposed to it, `tests/storage/test_repository.py`'s full-game/replay test, played
+  a complete `marks_to_win=7` game (hundreds of moves) specifically to prove a mid-game re-deal
+  round-trips correctly; dropping it to `marks_to_win=2` keeps that same proof (still asserts a
+  version delta of 2, i.e. a real re-deal, for its fixed seed) while cutting the suite's added cost
+  from unusable (multiple minutes) to about ten seconds. Real DynamoDB (and DynamoDB Local) has no
+  such behavior - this is a moto-only cost, confirmed against 5.2.2, the latest release - so nothing
+  about the fix reflects a real production concern, only a test-tool one.
 
 ## Layout
 
@@ -345,7 +380,8 @@ src/t42/storage/    DynamoDB event log + materialized state   (Phases 1, 2 and 2
     rule_sets.py    named HouseRules saved under a player's own partition (2.7.1)
     invites.py      GAME#/INVITE# + PLAYER#/INVITE# permission-grant CRUD (2.7.2)
     errors.py       GameNotFound, VersionConflict, SeatTaken, InvalidToken, ...
-    schema.py       create_table(dynamodb, name); `python -m t42.storage.schema` (3.6)
+    schema.py       create_table(dynamodb, name); `python -m t42.storage.schema` (3.6);
+                     stream enabled, NEW_AND_OLD_IMAGES (4.4)
 src/t42/api/        FastAPI app behind Mangum                 (Phases 2, 2.7 and 4.2, ongoing)
     app.py          the twenty-nine endpoints; `_submit` is the one write path for moves (2.4)
     deps.py         table/sender handles and the bearer-token dependency, all overridable (2.4, 4.2)
@@ -367,6 +403,10 @@ src/t42/notifications/  the send channel (Phase 4, underway)
     messages.py     pure dict -> (subject, body) renderers, one per notification kind
                      (4.1: turn/game-over/invite; 4.2 adds render_verify_contact;
                      4.3 adds render_password_reset)
+    records.py      transition_from_record: raw DynamoDB Streams record -> Transition (4.4)
+    handler.py      lambda_handler - stub, no tests, until 4.5 fills it in (4.4)
+    pump.py         poll()/main(); `python -m t42.notifications.pump` polls the stream
+                     locally and calls the handler with a Lambda-shaped batch (4.4)
 tests/conftest.py   the `table` (moto) and `real_table` (DynamoDB Local via testcontainers)
                     fixtures, shared by tests/storage/ and tests/api/
 tests/engine/       mirrors the engine modules; test_full_game.py is the Phase 0 milestone demo;
@@ -394,7 +434,11 @@ tests/cli/          mirrors src/t42/cli/; conftest.py's `cli_app_client` (`TestC
                     real app. test_render.py's leakage proof, test_layering.py and test_main.py
                     round out the suite (3.7)
 tests/notifications/  mirrors src/t42/notifications/; _helpers.py's `FakeSender` records sends
-                    with no network, following the `FakeTransport` precedent (4.1)
+                    with no network, following the `FakeTransport` precedent (4.1).
+                    test_records.py (4.4) decodes hand-built DynamoDB-JSON records;
+                    test_pump.py (4.4) drives poll() against the moto `table` fixture, which
+                    genuinely implements the Streams API; test_layering.py (4.4, pulled forward
+                    from 4.7) is the `t42.notifications`-specific ast import guard
 ```
 
 ## Commands

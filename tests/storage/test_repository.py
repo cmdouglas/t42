@@ -166,7 +166,13 @@ def test_last_activity_at_advances_on_append(table: Table) -> None:
 
 
 def test_full_game_through_repository_reaches_game_over_and_matches_replay(table: Table) -> None:
-    config = HouseRules()  # default marks_to_win=7: several hands, several re-deals
+    # marks_to_win=2, not the default 7: still forces at least one mid-game re-deal for this
+    # seed (proven by the assertion below), while keeping the move count - and so the number of
+    # transact_write_items calls against the moto-backed table - low. moto deep-copies the whole
+    # table, stream history included, before every transact_write_items call as a rollback
+    # backup (ROADMAP.md 4.4 enables the table's stream), so this test's cost grows with the
+    # square of its own move count; marks_to_win=7 made it the single slowest test in the suite.
+    config = HouseRules(marks_to_win=2)
     game_id = "full-game"
     rng = Random(7)
 
