@@ -7,8 +7,9 @@ minutes or hours rather than in real time. See [DESIGN.md](DESIGN.md) for the ar
 
 ## Status
 
-Phases 0 through 2 are complete. There is a pure rules engine covering all six contracts, durable
-storage in DynamoDB with the event log as the source of truth, and an HTTP API over both.
+Phases 0 through 4 are complete. There is a pure rules engine covering all six contracts, durable
+storage in DynamoDB with the event log as the source of truth, an HTTP API over both, a CLI client
+that plays a whole game, and email notifications driven off the table's stream.
 
 - **Phase 0, rules engine.** Dealing, the full auction (including plunge confirmation and the
   dealer-must-bid rule), all six contracts, trick resolution and scoring, with a whole game
@@ -20,11 +21,18 @@ storage in DynamoDB with the event log as the source of truth, and an HTTP API o
   and the player-specific projection.
 - **Phase 2, API.** FastAPI behind a Mangum adapter: accounts with per-device bearer tokens, a
   lobby, and the move endpoints. A full 4-player game runs signup to game-over over HTTP.
+- **Phase 2.7, tables.** Saved house-rule sets, invites by username, public or invite-only tables,
+  and a browse of open ones. Ahead of the CLI so its command set was written once against the
+  finished surface.
+- **Phase 3, CLI client.** The full command set, with a four-profile game played start to finish
+  from one machine.
+- **Phase 4, notifications.** DynamoDB Streams to a handler to SES, for the three things worth an
+  email: your turn, you've been invited, your game is over. Carries contact channels, email
+  verification and password reset.
 
-Next: **Phase 2.7**, tables - saved house-rule sets, invites by username, public or invite-only
-tables, and a browse of open ones. It goes ahead of **Phase 3**, the CLI client, so the command set
-is written once against the finished surface. Nothing is deployed yet - the API runs locally against
-DynamoDB Local, and provisioning is an open question recorded in ROADMAP.md.
+Next: **Phase 5**, deployment - the table, the API and the notifier provisioned from code with AWS
+CDK, and a real game played against a real endpoint (DESIGN.md section 14). Nothing is deployed
+yet; everything above runs locally against DynamoDB Local.
 
 ## Layout
 
@@ -33,6 +41,7 @@ src/t42/engine/     pure rules library: no I/O, no AWS, no dependency on the lay
 src/t42/storage/    DynamoDB event log, materialized state, lobby and accounts
 src/t42/api/        FastAPI app and its Lambda entry point
 src/t42/cli/        thin command-line client  (Phase 3)
+src/t42/notifications/  stream handler, message renderers and the email sender  (Phase 4)
 tests/
 ```
 
@@ -78,4 +87,12 @@ curl -X POST localhost:8765/players -H 'Content-Type: application/json' \
 
 curl -X POST localhost:8765/games -H 'Content-Type: application/json' \
   -H "Authorization: Bearer $TOKEN" -d '{"seat":0}'
+```
+
+To see notifications as well, run the stream pump in a second shell with the same environment
+exported. It polls DynamoDB Local's stream and calls the same handler AWS will, printing each
+email to stdout rather than sending it:
+
+```bash
+T42_EMAIL_SENDER=console uv run python -m t42.notifications.pump
 ```

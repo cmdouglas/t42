@@ -1,7 +1,7 @@
 # Roadmap
 
-Execution breakdown for the phases in [DESIGN.md](DESIGN.md) §10. Phases 0 through 4 are broken
-down in full; Phases 5 and 6 are sketched and will be expanded as they come up.
+Execution breakdown for the phases in [DESIGN.md](DESIGN.md) §10. Phases 0 through 5 are broken
+down in full; Phases 6 and 7 are sketched and will be expanded as they come up.
 
 Scaffolding is committed: toolchain, engine module layout, and the implemented primitives listed
 under "Done" below.
@@ -717,8 +717,9 @@ rule that makes "cannot see a hand" checkable (4.7).
   one an attacker may have supplied. And a completed reset revokes every issued token, because "my
   account was taken" and "reset my password" are in practice the same event, and leaving the
   intruder's device signed in defeats the reset.
-- Login rate limiting stays in Phase 5, unchanged. Stated here so the omission reads as a decision
-  rather than an oversight, since this is the phase that adds a second way to take an account over.
+- Login rate limiting stays in the hardening phase (Phase 7), unchanged. Stated here so the
+  omission reads as a decision rather than an oversight, since this is the phase that adds a second
+  way to take an account over.
 
 ### 4.4 Streams and the local pump
 
@@ -798,12 +799,185 @@ at all.
 
 ---
 
+## Phase 5: Deployment
+
+Goal: the table, the API and the notifier running in AWS, provisioned from code, with the CLI
+playing a real game against a real endpoint. Every phase so far has ended with "nothing is
+provisioned"; this is the one that changes that, and it is deliberately the first phase whose
+correctness depends on something outside this repository.
+
+Four decisions govern everything below.
+
+- **CDK, in Python, under `infra/`.** DESIGN.md §10 said "SAM/CDK/Terraform - pick one" and this
+  picks CDK: SAM's template model covers a Lambda-and-API stack well but not the alarms, budget
+  and SES identities in 5.4-5.5, and Terraform means a second state store to look after for a
+  hobby project. Python rather than TypeScript keeps this a one-language repository, which is
+  worth more here than CDK's better TypeScript ergonomics: `ruff` and `mypy` reach `infra/` with a
+  config line, whereas TypeScript would mean a second toolchain, a second lint setup and a second
+  thing to keep current.
+- **One stack, one region, one environment, deployed by hand.** No pipeline, no dev/prod split, no
+  custom domain. The rejected alternative is the usual one - a deploy pipeline and a staging
+  environment up front - and it is rejected for the reason 3.6 rejected pulling a stack forward:
+  it buys nothing yet. There is exactly one operator and the fast suite plus DynamoDB Local
+  already catch what a staging environment would. A CI deploy is a Phase 7 bullet, added when
+  deploying by hand becomes annoying rather than before.
+- **This phase lives in the SES sandbox**, which is the one externally imposed constraint worth
+  stating up front rather than discovering. In the sandbox SES will deliver only to addresses that
+  have themselves been verified, at 200 messages a day. That is enough to dogfood with four known
+  players and not enough to sign anyone else up. Leaving the sandbox is a support request that
+  wants a verified sending *domain* behind it, so it is recorded as a follow-up rather than done
+  here: it is the only thing on the whole list that needs a domain, and the API needs none (an
+  `execute-api` URL is a working endpoint, and DESIGN.md §7.3 already promised that reaching a
+  real one is a change to `--api-url` and nothing else).
+- **The table gets a second definition, and a test rather than a promise.**
+  `t42.storage.schema.create_table` stays what the moto and DynamoDB Local fixtures build from,
+  and it is written as literal `create_table` kwargs on purpose - boto3-stubs types that call as
+  overloads keyed on the keyword names - so the stack cannot simply import it and splat it into a
+  CDK construct. Rather than contort one side to feed the other, 5.1 declares the table twice and
+  adds a parity test comparing the synthesized template against the real thing. That is the trade
+  `tests/cli/test_layering.py` already made: a property that would otherwise be an argument in a
+  docstring becomes a fact a test can fail on.
+
+### 5.1 The CDK app and the table
+
+`infra/`: a `app.py` entry point, the stack module, and `cdk.json`. Dependencies go in an `infra`
+optional extra (`aws-cdk-lib`, `constructs`), kept out of the Lambda bundle the same way the `cli`
+extra already is and for the same reason. `ruff` and `mypy` widen to cover `infra/`, since the
+alternative is one directory in the repository nothing checks.
+
+- The table repeats `schema.py`'s key schema, `OpenGames` GSI, `PAY_PER_REQUEST` billing and
+  `NEW_AND_OLD_IMAGES` stream, and adds the three things a fixture has no use for and a real table
+  must not be without: `RemovalPolicy.RETAIN`, point-in-time recovery, and deletion protection.
+  A `cdk destroy` that takes the games with it is not a recoverable mistake.
+- `tests/infra/test_table_parity.py` synthesizes the stack, pulls the `AWS::DynamoDB::Table`
+  resource out of the template, and compares its key schema, attribute definitions, secondary
+  indexes and stream view type against `describe_table` of a moto table built by
+  `schema.create_table`. Both sides are CloudFormation-shaped, so this is a direct comparison and
+  not a translation layer. It is the whole answer to the duplication the preamble accepted.
+
+### 5.2 TTL for the single-use tokens
+
+Not polish, and not really a deployment concern except that this is the phase where the table
+starts accumulating rows nobody deletes. `accounts._mint_single_use_token` writes `expires_at` as
+an ISO-8601 **string**, and DynamoDB TTL reads only a Number of epoch seconds, so today every
+`VERIFY#` and `RESET#` item that is never redeemed stays in the table forever.
+
+- Add a numeric `ttl` attribute beside the existing `expires_at`. `expires_at` stays the authority
+  for the check in `_redeem_single_use_token`, and this is the point rather than a redundancy: TTL
+  deletion is best-effort and can run up to 48 hours late, so it is housekeeping and must never be
+  the thing standing between an expired token and a redemption.
+- Enable `TimeToLiveSpecification` on `ttl` in both `schema.create_table` and the stack, where
+  5.1's parity test covers it.
+- `TOKEN#` bearer items are untouched. They carry `expires_at: None` deliberately (DESIGN.md §6.1:
+  a device credential is revoked, not expired), so there is nothing for a reaper to key on.
+
+### 5.3 The API function and the HTTP API
+
+- A Python 3.13 arm64 `lambda.Function` on `t42.api.lambda_handler.handler`, which has been
+  waiting since 2.6. The bundle is built in Docker rather than locally: `fastapi` pulls in
+  `pydantic-core`, a compiled wheel, so a bundle assembled on a developer's macOS arm64 machine
+  imports nothing at all on Lambda. `uv export --frozen --no-dev` plus `uv pip install --target`
+  inside the runtime image gets the right wheels; Docker is already a prerequisite for
+  `pytest -m integration`, so this adds no new tool. The `cli` extra is excluded, which is what
+  that extra exists for.
+- Environment: `T42_TABLE_NAME` set, `T42_DYNAMODB_ENDPOINT` left unset, since `t42.api.deps`
+  reads unset as real AWS. IAM through `table.grant_read_write_data`, which covers the GSI.
+- In front of it an API Gateway HTTP API with a `$default` proxy route, and **no API keys**.
+  DESIGN.md §10 still says "wire up API keys" for Phase 2, which auth resolution (§6.1, §12) made
+  obsolete: the credential is a per-device bearer token the app itself checks. This phase deletes
+  that line rather than implementing it.
+- The stack outputs the endpoint URL. That URL is the entire deployment-facing surface of the
+  CLI: `--api-url` or `T42_API_URL` and nothing else.
+
+### 5.4 The notifier and SES
+
+- A second function on `t42.notifications.handler.lambda_handler` from the same bundle asset,
+  behind a `DynamoEventSource` on the table's stream. This is the real event-source mapping
+  `pump.py` has been standing in for since 4.4, calling the same entry point with the same
+  `{"Records": [...]}` shape, which is what that sub-phase built it that way for.
+- A retry limit, `bisectBatchOnError`, and an SQS dead-letter queue as the failure destination. A
+  stream shard is ordered, so a record that always throws blocks everything behind it until it
+  ages out; the DLQ is what turns that into an alarm (5.5) instead of a silence.
+- **No `ReportBatchItemFailures`**, stated so the omission reads as a decision. It would let a
+  partial batch retry only its failed records, but 4.5's conditional `notified_version` advance
+  already makes a redelivered record a no-op, so a whole-batch retry is correct and merely
+  wasteful at a volume of a few emails an hour. It is an optimization available later at the cost
+  of a return value the handler does not currently produce.
+- Environment: `T42_EMAIL_SENDER=ses` and `T42_SES_FROM_ADDRESS`. The first matters more than it
+  looks: `get_sender()` defaults to `console`, which was the right default for a local run (4.1)
+  but in Lambda would print every email to CloudWatch and report success. Nothing fails, nothing
+  alarms, and no one is notified, which is why 5.7's check is a real inbox and not a green
+  invocation. IAM adds `ses:SendEmail`.
+- The SES identities - the from-address and each dogfood recipient, per the sandbox rule above -
+  are declared in the stack, but an address identity is only usable once a human clicks the
+  confirmation link SES mails it. That step is half-manual by construction, and 5.6 writes it down
+  rather than letting a first deploy appear complete while nothing can send.
+
+### 5.5 Operations
+
+Small on purpose: enough to know something broke, and no more.
+
+- Log retention on both functions' log groups. The default is forever, and paying indefinitely to
+  store the logs of a game nobody is playing is the easiest cost mistake available here.
+- An SNS topic to the operator's address, with alarms on API function errors, notifier function
+  errors, and DLQ depth above zero. Those three cover "the API is down", "notifications stopped"
+  and "a record is poison", which is the whole failure surface at this size.
+- An AWS Budgets monthly alarm. The cheapest possible guard against a runaway, and the only one
+  that catches a mistake in a service the alarms above do not watch.
+- Deliberately absent: X-Ray, dashboards, a structured-logging framework, custom metrics. They are
+  what Phase 7 adds if operating this actually turns out to need them.
+
+### 5.6 Configuration and docs
+
+README gains a Deployment section: the prerequisites (an AWS account, the CDK CLI, one
+`cdk bootstrap`, Docker), `cdk deploy`, clicking through the SES verification mails, and pointing
+the CLI at the stack's output URL.
+
+Three staleness fixes ride along in the same pass, since this is the phase that reads that file
+closely. The Status paragraph still says Phases 0 through 2 are complete and that provisioning is
+an open question; the layout block never gained `src/t42/notifications/`; and the local-run
+instructions never gained `python -m t42.notifications.pump`, so the one documented way to run this
+project locally is missing half of Phase 4.
+
+### 5.7 The milestone: a real game against real infra
+
+Four profiles, four verified addresses, a full game to `GAME_OVER` against the deployed endpoint,
+with `--api-url` as the only thing that differs from the Phase 3 dogfood. Real emails arriving
+between turns, and at least one gap long enough that no container stays warm across it - the
+asynchronous-play claim (DESIGN.md §1) has been verified against a local pump and a `time.sleep`
+so far, and this is the first time it is verified against infrastructure that genuinely goes away
+between moves.
+
+This is not an automated test. It needs an AWS account and a human inbox, so it is a checklist in
+the README, the way Phase 3's dogfood was a thing a person did. The automated suites stay pointed
+at DynamoDB Local, which is what keeps `uv run pytest` free and offline.
+
+### Exit criteria
+
+- `cdk deploy` from a clean checkout provisions everything, with no console clicking but the SES
+  address confirmations
+- A full 4-player game plays to `GAME_OVER` against the deployed endpoint, with `--api-url` the
+  only change on the client side
+- All three notifications reach real inboxes, across a delay long enough to rule out a warm
+  container
+- The stack's table and `schema.py`'s cannot drift apart without a test failing
+- Verification and reset tokens leave the table on their own
+- A function error, a poison record and a surprising bill each reach the operator
+- Recorded and not built: leaving the SES sandbox (the one item that needs a domain), a custom API
+  domain, a CI deploy, a second environment
+
+---
+
 ## Later phases
 
-- **Phase 5, Hardening**: abandoned games, CLI errors and help, observability, login rate limiting
 - **Phase 6, Bot players**: DESIGN.md §13. Bot accounts, a uniform-random-legal policy over the
   projected view's `legal_moves`, and a Streams-driven turn trigger reusing Phase 4's plumbing. Last
   on purpose - a bot is a client of the finished API, so everything else has to work first
+- **Phase 7, Hardening**: abandoned games, CLI errors and help, login rate limiting, deeper
+  observability, and the CI deploy (GitHub Actions via an OIDC role) that Phase 5 left manual
+
+Phases 6 and 7 may be done in either order. The numbering exists to keep Phase 6's existing
+citations pointing at bots, not to claim hardening comes after them.
 
 ### Resolved: when does anything get deployed?
 
@@ -817,3 +991,7 @@ rejected because it buys nothing the CLI needs and costs the phase its focus: th
 coupling to where the server lives is `--api-url`, so pointing it at a provisioned endpoint later
 is a configuration change, and building that endpoint first would only mean choosing a deployment
 tool under time pressure from an unrelated phase.
+
+That later is now: Phase 5 above is the deployment work, chosen with Phases 0 through 4 finished
+and the shape of what needs provisioning settled by working code rather than guessed at, which is
+what deferring it was for.

@@ -5,7 +5,7 @@ the whole of the Lambda-specific code and nothing above it knows it is running i
 the point: the same ``app`` serves ``uvicorn`` locally and ``TestClient`` in the contract tests.
 
 Deploying this - the function, the HTTP API in front of it, the table and the IAM to connect them
-- is not part of Phase 2; see ROADMAP.md's open sequencing question.
+- is not part of Phase 2; it is Phase 5's work (DESIGN.md §14, ROADMAP.md 5.3).
 """
 
 from __future__ import annotations

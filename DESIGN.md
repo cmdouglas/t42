@@ -331,8 +331,9 @@ the same reason sign-in will not say which half of a credential was wrong; the m
 reset revokes every issued token, because "somebody took my account" and "reset my password" are
 in practice the same event, and leaving the intruder's device signed in defeats the point.
 
-**Login rate limiting** remains deferred to Phase 5; until then the floor is scrypt's cost plus
-error messages that do not distinguish an unknown username from a wrong password.
+**Login rate limiting** remains deferred to the hardening phase (Phase 7); until then the floor is
+scrypt's cost plus error messages that do not distinguish an unknown username from a wrong
+password.
 
 The threat model justifies that floor. An attacker who impersonates a player can see a hand and
 play moves — grief, not fraud. There is no money and no meaningful personal data beyond a display
@@ -579,7 +580,7 @@ Build the pure rules library: dominoes, suits/trump, bidding state machine, the 
 Design and implement the DynamoDB event log + materialized state + `project()` view function. Write the replay-from-events logic and snapshotting. Test against local DynamoDB (dynamodb-local or similar).
 
 **Phase 2 — API layer**
-Lambda handlers wrapping the domain engine and persistence layer, behind API Gateway. Wire up API keys. Contract tests for each endpoint (valid move, invalid move, out-of-turn, stale version).
+Lambda handlers wrapping the domain engine and persistence layer, behind API Gateway. Contract tests for each endpoint (valid move, invalid move, out-of-turn, stale version). Authentication is resolved in section 6.1 as per-device bearer tokens the app itself checks, so there are no API Gateway API keys to wire up.
 
 **Phase 2.7 - Tables**
 Saved rule sets, invite-by-username, public/invite-only visibility, and the open-games browse (sections 5.1, 6.2). Before the CLI on purpose: these are all table-setup surface, and the CLI's command set should be written once against the finished shape rather than grown into it.
@@ -590,11 +591,14 @@ Implement the command set in section 7 against a locally hosted API - `uvicorn` 
 **Phase 4 — Notifications**
 DynamoDB Streams → Lambda → SES, for the three transitions in section 8: your turn, you've been invited, your game is over. Carries the account work section 6.1 deferred until a send channel existed - contact-channel management, email verification and password reset - since verification is what decides who may be mailed at all. Verified against real play across a delay (the "hours between moves" case), locally: DynamoDB Local implements the Streams API, so nothing is provisioned in this phase either and deploy scripting stays in Phase 5.
 
-**Phase 5 — Hardening**
-Abandoned-game handling, better CLI error messages/help, deploy scripting (SAM/CDK/Terraform — pick one), basic logging/observability.
+**Phase 5 - Deployment**
+Section 14. The table, the API and the notifier provisioned from code with AWS CDK in Python: one stack, one region, one environment, deployed by hand. The milestone is a full 4-player game against the deployed endpoint with `--api-url` as the only client-side change, and real turn emails arriving in between.
 
 **Phase 6 - Bot players**
 Section 13. Last on purpose: it is the only feature that needs everything else working first, since a bot is a client of the finished API.
+
+**Phase 7 - Hardening**
+Abandoned-game handling, better CLI error messages/help, login rate limiting, deeper observability, and a CI deploy for the stack Phase 5 leaves on a manual `cdk deploy`. Interchangeable in order with Phase 6.
 
 Suggested order of effort: Phase 0 is the highest-risk, most logic-dense piece and should be done and well-tested before any AWS resources are provisioned — bugs there are cheapest to fix in isolation.
 
@@ -685,6 +689,12 @@ The Phase 3 CLI is the first test of this claim rather than a restatement of it,
   records, and SES is one implementation of a sender protocol that a console sender also
   implements. Pulling stream and SES provisioning forward was rejected for the reason the same
   question was rejected for the CLI: it buys the phase nothing and costs it its focus.
+- Resolved: **the deployment tool is AWS CDK, written in Python** (section 14), answering the
+  "SAM/CDK/Terraform - pick one" this section's own Phase 5 entry carried. SAM covers a
+  Lambda-and-API stack but not the alarms, budget and SES identities around it; Terraform means a
+  second state store to look after. Python over TypeScript keeps this a one-language repository,
+  which is worth more than CDK's better TypeScript ergonomics given that `ruff` and `mypy` then
+  reach the infrastructure code for free.
 
 ## 13. Bot Players (post-MVP)
 
@@ -720,4 +730,47 @@ measured in hours.
 **Left open**, to be settled when the phase is picked up: how a bot gets seated. An explicit "add a
 bot" call from a seated player is the simplest, and auto-filling a table that has sat idle past some
 `last_activity_at` threshold is the more useful; they are not exclusive, and the second overlaps
-Phase 5's abandoned-game work.
+Phase 7's abandoned-game work.
+
+## 14. Deployment
+
+Section 3's diagram is the target, and this section is what provisioning it means. Nothing here is
+built; Phase 5 (section 10, broken down in ROADMAP.md) is the work.
+
+**AWS CDK in Python, in an `infra/` directory**, resolving the "pick one" section 10 carried. One
+stack, one region, one environment, deployed by hand with `cdk deploy`. There is one operator, and
+a pipeline plus a staging environment would buy nothing that the fast suite and the DynamoDB Local
+integration suite do not already catch. A CI deploy is Phase 7's, added when deploying by hand is
+demonstrably annoying rather than in anticipation of it.
+
+The stack is small: the `Texas42` table, two Lambda functions from one bundle
+(`t42.api.lambda_handler.handler` behind an API Gateway HTTP API, and
+`t42.notifications.handler.lambda_handler` behind a DynamoDB Streams event-source mapping with a
+dead-letter queue), the IAM to connect them, SES identities, log retention, a handful of alarms
+and a monthly budget. The table is deployed with `RETAIN`, point-in-time recovery and deletion
+protection, which is the difference between the real one and the one a test fixture creates.
+
+**The table is therefore defined twice** - `t42.storage.schema.create_table` for local runs and
+tests, the stack for AWS - because `create_table` is written as literal boto3 kwargs to satisfy
+boto3-stubs' overloads and cannot be splatted into a CDK construct. A synthesized-template parity
+test is what keeps the two honest, in preference to contorting either side into feeding the other.
+
+**SES is the one real external constraint.** A new account's SES is in the *sandbox*: it delivers
+only to addresses that have themselves been verified, capped at 200 messages a day. That is
+sufficient to dogfood a four-player game and insufficient to let a stranger sign up. Leaving the
+sandbox is a support request that in practice wants a verified sending domain behind it, so **the
+one thing a domain is needed for is emailing players who did not verify their own address**. The
+API needs none: an `execute-api` URL is a working endpoint, and section 7.3 already committed to a
+real one being a `--api-url` change and nothing else. A custom domain for the API is therefore
+cosmetic and deliberately out of scope.
+
+**A note on TTL**, since deployment is when a table starts accumulating rows nobody deletes. The
+`VERIFY#` and `RESET#` items carry `expires_at` as an ISO-8601 string, which DynamoDB TTL cannot
+read, so an unredeemed token currently lives forever. Phase 5 adds a numeric attribute for TTL to
+key on, alongside rather than instead of `expires_at`: TTL deletion is best-effort and can lag by
+up to 48 hours, so it is housekeeping and must never be what stands between an expired token and a
+redemption. The application-level expiry check in `accounts.py` stays the authority.
+
+Deliberately absent, and each a thing to add when operating this asks for it rather than now: a
+deploy pipeline, a second environment, a custom API domain, X-Ray, dashboards, custom metrics, and
+a structured-logging framework.

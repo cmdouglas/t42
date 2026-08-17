@@ -137,7 +137,8 @@ Two things worth knowing before touching the API layer:
   `_submit`, which is the single write path behind all three move endpoints.
 
 Deployment is deliberately not part of Phase 2 - there is a Mangum entry point and nothing
-provisioned. ROADMAP.md carries the open sequencing question about when that changes.
+provisioned. That changes in Phase 5 (DESIGN.md §14, ROADMAP.md 5.1-5.7), which is written out but
+not yet executed: still nothing provisioned.
 
 Phase 2.7 (tables) is complete, landing ahead of the CLI so its command set is written once
 against the finished surface rather than grown into it. See DESIGN.md §5.1, §6.2 and §4.1 for the
