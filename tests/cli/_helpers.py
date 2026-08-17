@@ -26,8 +26,6 @@ class FakeResponse:
     body: Any = None
 
     def json(self) -> Any:
-        if self.body is None:
-            raise ValueError("no body")
         return self.body
 
 

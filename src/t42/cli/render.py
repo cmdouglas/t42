@@ -244,6 +244,12 @@ def render_token(response: dict[str, Any]) -> str:
     return f"signed in as {response['username']} ({response['player_id']})"
 
 
+def _render_contact_line(contact: dict[str, Any]) -> str:
+    verified = "verified" if contact["verified"] else "unverified"
+    notify = "notifying" if contact["notify"] else "muted"
+    return f"{contact['kind']}: {contact['address']} ({verified}, {notify})"
+
+
 def render_profile(player: dict[str, Any]) -> str:
     lines = [
         f"{player['username']} ({player['player_id']})",
@@ -254,8 +260,7 @@ def render_profile(player: dict[str, Any]) -> str:
     if contacts:
         lines.append("contacts:")
         for contact in contacts:
-            verified = "verified" if contact["verified"] else "unverified"
-            lines.append(f"  {contact['kind']}: {contact['address']} ({verified})")
+            lines.append(f"  {_render_contact_line(contact)}")
     else:
         lines.append("contacts: (none)")
 
@@ -269,3 +274,14 @@ def render_profile(player: dict[str, Any]) -> str:
         lines.append("devices: (none)")
 
     return "\n".join(lines)
+
+
+def render_contact(contact: dict[str, Any]) -> str:
+    return _render_contact_line(contact)
+
+
+def render_contact_list(response: dict[str, Any]) -> str:
+    contacts = response["contacts"]
+    if not contacts:
+        return "(no contact channels)"
+    return "\n".join(_render_contact_line(c) for c in contacts)

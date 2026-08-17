@@ -386,6 +386,23 @@ Phase 4 (notifications) is underway; see ROADMAP.md for the full 4.1-4.7 breakdo
   `T42_EMAIL_SENDER=console` - the console print of "It's your turn" for the correct seat, with
   `notified_version` on the item matching the `STATE` version that produced it, is what surfaced
   the empty-map bug above and confirmed the fix.
+- **4.6 (CLI commands)** is complete: `t42 contacts`, `t42 contact add|remove|verify|confirm|
+  mute|unmute`, `t42 forgot-password` and `t42 reset-password` join `src/t42/cli/commands/
+  account.py`, following 3.4's `register`/`login`/`rules` shape with no new machinery -
+  `contact confirm` and `reset-password` reuse `build_client(..., require_auth=False)`, the same
+  seam `register`/`login` already use, since the token each one carries is itself the credential
+  (DESIGN.md §6.1). `render.py` gains `render_contact`/`render_contact_list`, and factors the
+  shared `_render_contact_line` helper out of `render_profile`'s own contact loop so it also shows
+  mute status - `render_profile` had no way to reflect a mute before this, which would have left
+  `t42 whoami` silently stale the moment `t42 contact mute` existed. `tests/cli/_helpers.py`'s
+  `FakeResponse.json()` no longer raises on a `None` body: real FastAPI serializes a `None`-typed
+  `202`/`204` response body as JSON `null`, which `.json()` decodes to `None` without error, and
+  nothing here previously exercised a non-204 success response with an empty body to notice the
+  mismatch. `tests/cli/conftest.py`'s `cli_app_client` now also overrides `t42.notifications.
+  get_sender` with a `FakeSender`, exposed as a `fake_sender` fixture the same way `tests/api/
+  conftest.py`'s already does - what lets `test_commands.py`'s full walkthrough capture a mailed
+  verification/reset token and complete both round trips for real, the same way `tests/api/
+  test_contacts.py`/`test_password_reset.py` already do at the API layer.
 
 ## Layout
 

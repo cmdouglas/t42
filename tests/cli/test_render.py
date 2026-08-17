@@ -424,8 +424,8 @@ def test_profile_renders_all_contacts_and_devices() -> None:
         "username": "carol",
         "created_at": "2026-08-01T00:00:00Z",
         "contacts": [
-            {"kind": "email", "address": "carol@example.com", "verified": True},
-            {"kind": "sms", "address": "+15551234567", "verified": False},
+            {"kind": "email", "address": "carol@example.com", "verified": True, "notify": True},
+            {"kind": "sms", "address": "+15551234567", "verified": False, "notify": False},
         ],
         "devices": [
             {
@@ -447,6 +447,8 @@ def test_profile_renders_all_contacts_and_devices() -> None:
     assert "verified" in result
     assert "+15551234567" in result
     assert "unverified" in result
+    assert "notifying" in result
+    assert "muted" in result
     assert "laptop" in result
     assert "phone" in result
 
@@ -462,6 +464,33 @@ def test_profile_empty_contacts_and_devices() -> None:
     result = render.render_profile(player)
     assert "contacts: (none)" in result
     assert "devices: (none)" in result
+
+
+# --- contacts (ROADMAP.md 4.6) ------------------------------------------------------
+
+
+def test_render_contact_shows_kind_address_verified_and_notify() -> None:
+    contact = {"kind": "email", "address": "carol@example.com", "verified": True, "notify": False}
+    result = render.render_contact(contact)
+    assert "carol@example.com" in result
+    assert "verified" in result
+    assert "muted" in result
+
+
+def test_render_contact_list_shows_every_contact() -> None:
+    response = {
+        "contacts": [
+            {"kind": "email", "address": "a@example.com", "verified": True, "notify": True},
+            {"kind": "email", "address": "b@example.com", "verified": False, "notify": True},
+        ]
+    }
+    result = render.render_contact_list(response)
+    assert "a@example.com" in result
+    assert "b@example.com" in result
+
+
+def test_render_contact_list_when_empty() -> None:
+    assert render.render_contact_list({"contacts": []}) == "(no contact channels)"
 
 
 # --- the third leakage proof (ROADMAP.md 3.7) -----------------------------------------------
