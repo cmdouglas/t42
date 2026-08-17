@@ -247,7 +247,7 @@ Phase 3 (CLI) is complete; bot players are designed in DESIGN.md §13 and sequen
   `render.py`'s `_render_trick` assumed `current_trick` was never `None`, but every response to
   the move that ends a game has exactly that shape - fixed, with a regression test.
 
-Phase 4 (notifications) is underway; see ROADMAP.md for the full 4.1-4.7 breakdown.
+Phase 4 (notifications) is complete; see ROADMAP.md for the full 4.1-4.7 breakdown.
 
 - **4.1 (the send channel)** is complete: new top-level package `src/t42/notifications/`, importing
   only `boto3` (nothing from `t42.storage` or `t42.engine` yet - that permission is reserved for
@@ -403,6 +403,27 @@ Phase 4 (notifications) is underway; see ROADMAP.md for the full 4.1-4.7 breakdo
   conftest.py`'s already does - what lets `test_commands.py`'s full walkthrough capture a mailed
   verification/reset token and complete both round trips for real, the same way `tests/api/
   test_contacts.py`/`test_password_reset.py` already do at the API layer.
+- **4.7 (tests)** is complete, closing out Phase 4. Every other test the phase named had already
+  been pulled forward as its own sub-phase landed - `test_messages.py`, `test_handler.py` and
+  `test_layering.py` (4.1/4.4/4.5), `tests/api/test_contacts.py`/`test_password_reset.py` (4.2/4.3)
+  and the CLI round trip in `tests/cli/test_commands.py`/`test_commands_account.py` (4.6) - so the
+  one thing left was the phase milestone itself: `tests/notifications/test_integration.py`
+  (`@pytest.mark.integration`), which registers four real players against real DynamoDB Local,
+  verifies three of their email contacts over real HTTP and deliberately leaves the fourth's
+  unverified, plays a full game move by move through the real API, and after every move drains the
+  real stream through `t42.notifications.pump.poll` into `send_notifications` - not a spy standing
+  in for either. `poll` opens a fresh `TRIM_HORIZON` iterator on every call rather than persisting
+  one, so every drain re-reads the stream's entire history so far; the test leans on that rather
+  than working around it, since it means every single drain - not just a dedicated one at the end -
+  is a real proof that `_claim`'s conditional write makes redelivery a no-op. One real
+  `time.sleep` sits between two moves rather than a mocked clock, earning DESIGN.md §10's "verify
+  against real play across a delay" without provisioning anything. A first assumption that the
+  initial deal produces no notification turned out to be wrong and the test caught it: joining a
+  seat inserts a fresh `PLAYER#`/`GAME#` item, but dealing the first hand on the fourth join then
+  *updates* that already-existing item to flip `is_my_turn` for whoever bids first - a genuine
+  false-to-true transition, so the very first actor legitimately gets a "your turn" email, and the
+  test now asserts that rather than assuming silence. With this, Phase 4's exit criteria
+  (ROADMAP.md) are all met.
 
 ## Layout
 
