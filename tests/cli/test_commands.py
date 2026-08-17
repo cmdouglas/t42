@@ -14,15 +14,19 @@ table itself; this proves each *bucket* is actually reachable end to end.
 
 from __future__ import annotations
 
+import re
+
 import pytest
 from fastapi.testclient import TestClient
 
 from t42.cli import context
 from t42.cli.main import main
 
+from ..notifications._helpers import FakeSender
 from ._helpers import play_full_game_via_cli, run_json
 
 _PASSWORD = "correct-horse-battery"
+_NEW_PASSWORD = "new-correct-horse-battery"
 
 
 @pytest.fixture(autouse=True)
@@ -36,7 +40,9 @@ def _register(profile: str, capsys: pytest.CaptureFixture[str]) -> None:
     assert exit_code == 0
 
 
-def test_full_command_walkthrough(capsys: pytest.CaptureFixture[str]) -> None:
+def test_full_command_walkthrough(
+    capsys: pytest.CaptureFixture[str], fake_sender: FakeSender
+) -> None:
     for profile in ("alice", "bob", "carol", "dave", "erin", "frank"):
         _register(profile, capsys)
 
@@ -130,6 +136,53 @@ def test_full_command_walkthrough(capsys: pytest.CaptureFixture[str]) -> None:
 
     final = play_full_game_via_cli(["alice", "bob", "carol", "dave"], code, capsys)
     assert final["status"] == "COMPLETE" or final["view"]["phase"] == "GAME_OVER"
+
+    # contacts and password reset (ROADMAP.md 4.6)
+    exit_code = main(["--profile", "alice", "contact", "add", "alice@example.com"])
+    capsys.readouterr()
+    assert exit_code == 0
+
+    contacts = run_json(["--profile", "alice", "--json", "contacts"], capsys)
+    assert any(c["address"] == "alice@example.com" for c in contacts["contacts"])
+
+    exit_code = main(["--profile", "alice", "contact", "verify", "alice@example.com"])
+    capsys.readouterr()
+    assert exit_code == 0
+
+    verify_match = re.search(r"t42 contact confirm (\S+)", fake_sender.sent[-1].body)
+    assert verify_match is not None
+    exit_code = main(["contact", "confirm", verify_match.group(1)])  # works signed out
+    capsys.readouterr()
+    assert exit_code == 0
+
+    whoami = run_json(["--profile", "alice", "--json", "whoami"], capsys)
+    assert any(c["address"] == "alice@example.com" and c["verified"] for c in whoami["contacts"])
+
+    exit_code = main(["--profile", "alice", "contact", "mute", "alice@example.com"])
+    capsys.readouterr()
+    assert exit_code == 0
+    exit_code = main(["--profile", "alice", "contact", "unmute", "alice@example.com"])
+    capsys.readouterr()
+    assert exit_code == 0
+
+    exit_code = main(["forgot-password", "alice"])  # works signed out
+    capsys.readouterr()
+    assert exit_code == 0
+
+    reset_match = re.search(r"t42 reset-password (\S+)", fake_sender.sent[-1].body)
+    assert reset_match is not None
+    exit_code = main(["reset-password", reset_match.group(1), "--password", _NEW_PASSWORD])
+    capsys.readouterr()
+    assert exit_code == 0
+
+    # the reset revoked every device, so this login mints a fresh token for the profile
+    exit_code = main(["--profile", "alice", "login", "alice", "--password", _NEW_PASSWORD])
+    capsys.readouterr()
+    assert exit_code == 0
+
+    exit_code = main(["--profile", "alice", "contact", "remove", "alice@example.com"])
+    capsys.readouterr()
+    assert exit_code == 0
 
     exit_code = main(["--profile", "alice", "logout"])
     capsys.readouterr()

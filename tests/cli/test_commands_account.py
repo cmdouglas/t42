@@ -168,3 +168,191 @@ def test_logout_calls_delete_sessions_current(
     assert transport.calls[0].method == "DELETE"
     assert transport.calls[0].url == "/sessions/current"
     assert transport.calls[0].headers["Authorization"] == "Bearer tok-1"
+
+
+# -- contacts and password reset (ROADMAP.md 4.6) ------------------------------------------------
+
+
+def _sign_in(profile: str = "default") -> None:
+    cfg = config.set_profile(config.Config(), profile, config.Profile("p1", "alice", "tok-1"))
+    config.save(cfg)
+
+
+def _contact_args(
+    contact_command: str,
+    *,
+    address: str | None = None,
+    kind: str = "email",
+    token: str | None = None,
+    profile: str | None = None,
+    json: bool = False,
+) -> argparse.Namespace:
+    return argparse.Namespace(
+        contact_command=contact_command,
+        address=address,
+        kind=kind,
+        token=token,
+        profile=profile,
+        json=json,
+        api_url="http://x",
+    )
+
+
+def test_contacts_lists_channels(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _sign_in()
+    body = {
+        "contacts": [
+            {"kind": "email", "address": "a@example.com", "verified": True, "notify": True}
+        ]
+    }
+    transport = fake_transport(body)
+    monkeypatch.setattr(context, "transport_factory", lambda url: transport)
+
+    status = _command("contacts").handler(
+        argparse.Namespace(profile=None, json=False, api_url="http://x")
+    )
+
+    assert status == 0
+    assert transport.calls[0].method == "GET"
+    assert transport.calls[0].url == "/players/me/contacts"
+
+
+def test_contact_add_sends_kind_and_address(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _sign_in()
+    contact = {"kind": "email", "address": "a@example.com", "verified": False, "notify": True}
+    transport = fake_transport(contact, status_code=201)
+    monkeypatch.setattr(context, "transport_factory", lambda url: transport)
+
+    status = _command("contact").handler(
+        _contact_args("add", address="a@example.com", kind="email")
+    )
+
+    assert status == 0
+    call = transport.calls[0]
+    assert call.method == "POST"
+    assert call.url == "/players/me/contacts"
+    assert call.json == {"kind": "email", "address": "a@example.com"}
+
+
+def test_contact_remove_calls_delete(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _sign_in()
+    transport = fake_transport(None, status_code=204)
+    monkeypatch.setattr(context, "transport_factory", lambda url: transport)
+
+    status = _command("contact").handler(_contact_args("remove", address="a@example.com"))
+
+    assert status == 0
+    assert transport.calls[0].method == "DELETE"
+    assert transport.calls[0].url == "/players/me/contacts/a@example.com"
+
+
+def test_contact_verify_calls_verification_endpoint(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _sign_in()
+    transport = fake_transport(None, status_code=202)
+    monkeypatch.setattr(context, "transport_factory", lambda url: transport)
+
+    status = _command("contact").handler(_contact_args("verify", address="a@example.com"))
+
+    assert status == 0
+    assert transport.calls[0].method == "POST"
+    assert transport.calls[0].url == "/players/me/contacts/a@example.com/verification"
+
+
+def test_contact_confirm_works_without_a_profile(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    transport = fake_transport(None, status_code=204)
+    monkeypatch.setattr(context, "transport_factory", lambda url: transport)
+
+    status = _command("contact").handler(_contact_args("confirm", token="tok-abc"))
+
+    assert status == 0
+    call = transport.calls[0]
+    assert call.method == "POST"
+    assert call.url == "/contacts/verify"
+    assert call.json == {"token": "tok-abc"}
+    assert "Authorization" not in call.headers
+
+
+def test_contact_mute_sends_notify_false(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _sign_in()
+    contact = {"kind": "email", "address": "a@example.com", "verified": True, "notify": False}
+    transport = fake_transport(contact)
+    monkeypatch.setattr(context, "transport_factory", lambda url: transport)
+
+    status = _command("contact").handler(_contact_args("mute", address="a@example.com"))
+
+    assert status == 0
+    call = transport.calls[0]
+    assert call.method == "PATCH"
+    assert call.url == "/players/me/contacts/a@example.com"
+    assert call.json == {"notify": False}
+
+
+def test_contact_unmute_sends_notify_true(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _sign_in()
+    contact = {"kind": "email", "address": "a@example.com", "verified": True, "notify": True}
+    transport = fake_transport(contact)
+    monkeypatch.setattr(context, "transport_factory", lambda url: transport)
+
+    status = _command("contact").handler(_contact_args("unmute", address="a@example.com"))
+
+    assert status == 0
+    assert transport.calls[0].json == {"notify": True}
+
+
+def test_forgot_password_works_without_a_profile(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    transport = fake_transport(None, status_code=202)
+    monkeypatch.setattr(context, "transport_factory", lambda url: transport)
+
+    status = _command("forgot-password").handler(
+        argparse.Namespace(username="alice", profile=None, json=False, api_url="http://x")
+    )
+
+    assert status == 0
+    call = transport.calls[0]
+    assert call.method == "POST"
+    assert call.url == "/password-resets"
+    assert call.json == {"username": "alice"}
+    assert "Authorization" not in call.headers
+
+
+def test_reset_password_reads_password_flag(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    transport = fake_transport(None, status_code=204)
+    monkeypatch.setattr(context, "transport_factory", lambda url: transport)
+
+    status = _command("reset-password").handler(
+        argparse.Namespace(
+            token="reset-tok", password="new-secret", profile=None, json=False, api_url="http://x"
+        )
+    )
+
+    assert status == 0
+    call = transport.calls[0]
+    assert call.method == "POST"
+    assert call.url == "/password-resets/confirm"
+    assert call.json == {"token": "reset-tok", "new_password": "new-secret"}
+
+
+def test_reset_password_prompts_for_password_when_omitted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    transport = fake_transport(None, status_code=204)
+    monkeypatch.setattr(context, "transport_factory", lambda url: transport)
+    monkeypatch.setattr("getpass.getpass", lambda prompt: "prompted-pw")
+
+    _command("reset-password").handler(
+        argparse.Namespace(
+            token="reset-tok", password=None, profile=None, json=False, api_url="http://x"
+        )
+    )
+
+    assert transport.calls[0].json["new_password"] == "prompted-pw"
