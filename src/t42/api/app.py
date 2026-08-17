@@ -406,7 +406,15 @@ def create_invite(
     seat = lobby.seat_of(invitee_id)
     if seat is not None:
         raise AlreadySeated(game_id, seat.value)
-    invite_player(table, game_id, invitee_id, body.username)
+    inviter_seat = lobby.seat_of(player_id)
+    assert inviter_seat is not None  # _require_seat already proved this
+    invite_player(
+        table,
+        game_id,
+        invitee_id,
+        body.username,
+        inviter_username=lobby.seats[inviter_seat].username,
+    )
     return InviteResponse(game_id=game_id, player_id=invitee_id, username=body.username)
 
 

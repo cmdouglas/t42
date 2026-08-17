@@ -348,6 +348,44 @@ Phase 4 (notifications) is underway; see ROADMAP.md for the full 4.1-4.7 breakdo
   from unusable (multiple minutes) to about ten seconds. Real DynamoDB (and DynamoDB Local) has no
   such behavior - this is a moto-only cost, confirmed against 5.2.2, the latest release - so nothing
   about the fix reflects a real production concern, only a test-tool one.
+- **4.5 (the handler)** is complete: `handler.py`'s stub is replaced by a pure classifier,
+  `notifications_for(records)`, and an I/O half, `send_notifications(table, sender, records)`,
+  injectable the same way `pump.poll()`'s `handler`/`sleep` are. Three storage-layer gaps closed
+  first, since ROADMAP.md 4.5 named them as this sub-phase's own prerequisite work rather than
+  separate phases: `repository.py`'s `start_game`/`append` now stamp `version` onto every
+  `PLAYER#` item - reusing the same version number already being written to `STATE` in that
+  transaction, not a separate counter - so the handler has something to dedupe a redelivered
+  stream record against; `append` denormalizes final `marks` onto `META` on the game-ending write,
+  in the same `{"north_south": int, "east_west": int}` shape `projection.py` already uses, so the
+  handler can render a game-over email without ever reading `STATE`; and `invites.py`'s
+  `invite_player` gains a keyword-only `inviter_username`, stored as `invited_by` on the invitee's
+  own item, with `app.py`'s invite handler resolving it off the `lobby` it already has in scope.
+  The classifier claims a transition (`notified_version` on `GAME#` items, a plain `notified` flag
+  on `INVITE#` items, since those have no version to compare against) *before* resolving a
+  recipient, deliberately: `notified_version` means "this transition was processed," not "an email
+  went out," which is both a simpler invariant and cheaper on the redelivery `pump.py`'s own
+  restart-reopens-at-`TRIM_HORIZON` behavior can produce. A transition missing `version` (a
+  pre-migration item) is skipped rather than claimed with `version=None`, which would make the
+  dedup condition permanently unsatisfiable. **A real bug surfaced by end-to-end testing against
+  real DynamoDB Local, not caught by any existing test**: real DynamoDB Streams drops the `"M"`
+  type wrapper for an empty map attribute - `HouseRules.contract_options` is the common case,
+  since it's `{}` on any game with no contract options set - so a bare `{}` shows up nested inside
+  `OldImage`/`NewImage` instead of `{"M": {}}`, which `boto3.dynamodb.types.TypeDeserializer`
+  treats as malformed input and raises on, crashing the whole batch. moto's stream implementation
+  never reproduces this (confirmed against moto 5.2.2), so it was invisible to every test written
+  through 4.4. `records.py`'s `_decode` now walks the attribute-value tree ahead of deserializing
+  and restores the dropped wrapper (`_restore_empty_map_wrapper`); empty lists are unaffected,
+  arriving as `{"L": []}` with the wrapper intact, confirmed by inspecting real captured stream
+  records rather than assumed. `tests/notifications/test_handler.py` is new, covering each rule
+  firing exactly once, a duplicate record sending nothing (both kinds of dedup marker), an
+  unverified/muted/absent/non-email contact sending nothing while still claiming the transition,
+  the handler's own dedup write producing a `MODIFY` that matches neither rule (the no-loop
+  guarantee), `join_seat`'s initial `INSERT` not misfiring as a turn flip, and `lambda_handler`'s
+  delegation to `send_notifications`. Verified against a real signup-to-first-move game driven
+  through a locally hosted API, a real DynamoDB Local table and stream, and `pump.py` with
+  `T42_EMAIL_SENDER=console` - the console print of "It's your turn" for the correct seat, with
+  `notified_version` on the item matching the `STATE` version that produced it, is what surfaced
+  the empty-map bug above and confirmed the fix.
 
 ## Layout
 
@@ -403,8 +441,10 @@ src/t42/notifications/  the send channel (Phase 4, underway)
     messages.py     pure dict -> (subject, body) renderers, one per notification kind
                      (4.1: turn/game-over/invite; 4.2 adds render_verify_contact;
                      4.3 adds render_password_reset)
-    records.py      transition_from_record: raw DynamoDB Streams record -> Transition (4.4)
-    handler.py      lambda_handler - stub, no tests, until 4.5 fills it in (4.4)
+    records.py      transition_from_record: raw DynamoDB Streams record -> Transition (4.4);
+                     tolerates real DynamoDB Streams dropping the "M" wrapper on an empty map (4.5)
+    handler.py      lambda_handler over notifications_for (pure classifier) and
+                     send_notifications (injectable I/O): who gets emailed, when (4.5)
     pump.py         poll()/main(); `python -m t42.notifications.pump` polls the stream
                      locally and calls the handler with a Lambda-shaped batch (4.4)
 tests/conftest.py   the `table` (moto) and `real_table` (DynamoDB Local via testcontainers)
@@ -435,10 +475,13 @@ tests/cli/          mirrors src/t42/cli/; conftest.py's `cli_app_client` (`TestC
                     round out the suite (3.7)
 tests/notifications/  mirrors src/t42/notifications/; _helpers.py's `FakeSender` records sends
                     with no network, following the `FakeTransport` precedent (4.1).
-                    test_records.py (4.4) decodes hand-built DynamoDB-JSON records;
-                    test_pump.py (4.4) drives poll() against the moto `table` fixture, which
-                    genuinely implements the Streams API; test_layering.py (4.4, pulled forward
-                    from 4.7) is the `t42.notifications`-specific ast import guard
+                    test_records.py (4.4) decodes hand-built DynamoDB-JSON records, including the
+                    4.5 regression for a dropped empty-map type wrapper; test_pump.py (4.4) drives
+                    poll() against the moto `table` fixture, which genuinely implements the Streams
+                    API; test_layering.py (4.4, pulled forward from 4.7) is the
+                    `t42.notifications`-specific ast import guard; test_handler.py (4.5) covers
+                    notifications_for's classification rules and send_notifications' dedup/
+                    recipient-filtering/rendering against the moto `table` fixture and `FakeSender`
 ```
 
 ## Commands
